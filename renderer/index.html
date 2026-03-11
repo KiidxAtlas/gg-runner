@@ -20,6 +20,7 @@
                 <button id="btn-refresh" title="Refresh ports">↺</button>
                 <button id="btn-connect">Connect</button>
                 <span id="conn-status" class="badge badge-off">Disconnected</span>
+                <span id="fw-status" class="dim"></span>
                 <span id="machine-pos" class="dim"></span>
                 <label id="dev-mode-label" title="Simulate machine — no serial needed">
                     <input type="checkbox" id="chk-dev-mode"> Dev
@@ -39,6 +40,18 @@
                 <section class="panel-section">
                     <h3 class="section-title">Slide Type</h3>
                     <div id="slide-radios"></div>
+                </section>
+
+                <section class="panel-section">
+                    <h3 class="section-title">Current State</h3>
+                    <div class="state-row">
+                        <span class="state-label">Selected</span>
+                        <span id="selected-slide-state" class="state-value state-empty">None</span>
+                    </div>
+                    <div class="state-row">
+                        <span class="state-label">Configured</span>
+                        <span id="configured-slide-state" class="state-value state-empty">None</span>
+                    </div>
                 </section>
 
                 <section class="panel-section">
@@ -176,6 +189,8 @@
 
                 <section class="panel-section" id="machine-ctrl-section">
                     <h3 class="section-title">Machine Controls</h3>
+
+                    <button id="btn-tool-change" class="btn-secondary full-width">Tool Change</button>
 
                     <!-- Feed rate override -->
                     <div class="override-row override-slider-row">

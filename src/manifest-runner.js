@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
+const { normalizeLibraryGcodeLine } = require('./library-compat');
 
 // Regex to detect DDcut-only M-codes that must NOT be forwarded to machine
 const DDCUT_MCODE = /^M(100|101|102|106|107|108)\b/i;
@@ -200,8 +201,10 @@ class ManifestRunner {
         this._aborted = false;
         const lines = fs.readFileSync(gcodePath, 'utf8').split('\n');
 
-        for (const rawLine of lines) {
+        for (const sourceLine of lines) {
             if (this._aborted) return { error: 'Aborted' };
+
+            const rawLine = normalizeLibraryGcodeLine(step.step_gcode, sourceLine);
 
             const rawTrimmed = rawLine.trim();
             // For DDcut M-codes, preserve raw line (parentheses are expressions, not comments).

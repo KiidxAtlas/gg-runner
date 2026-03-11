@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const ALLOWED_CHANNELS = [
     'machine:status',
+    'machine:firmware',
     'machine:line',
     'machine:alarm',
     'machine:disconnect',
@@ -21,6 +22,7 @@ contextBridge.exposeInMainWorld('gg', {
     disconnect: () => ipcRenderer.invoke('serial:disconnect'),
     sendLine: (line) => ipcRenderer.invoke('serial:send', line),
     sendRealtime: (code) => ipcRenderer.invoke('serial:realtime', code),
+    getFirmwareInfo: () => ipcRenderer.invoke('serial:firmware'),
 
     // ── Workflow queries (sync-ish) ───────────────────────────────────────
     getSlides: () => ipcRenderer.invoke('workflow:slides'),
@@ -33,6 +35,7 @@ contextBridge.exposeInMainWorld('gg', {
 
     // ── Setup phase ───────────────────────────────────────────────────────
     position: () => ipcRenderer.invoke('workflow:position'),
+    toolChange: () => ipcRenderer.invoke('workflow:toolChange'),
     probe: () => ipcRenderer.invoke('workflow:probe'),
     configure: () => ipcRenderer.invoke('workflow:configure'),
 
@@ -53,6 +56,7 @@ contextBridge.exposeInMainWorld('gg', {
 
     // ── Library path ─────────────────────────────────────────────────────
     getLibPath: () => ipcRenderer.invoke('lib:getPath'),
+    getLibStatus: () => ipcRenderer.invoke('lib:getStatus'),
     browseLibPath: () => ipcRenderer.invoke('lib:browse'),
 
     // ── Event subscriptions ───────────────────────────────────────────────

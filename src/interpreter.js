@@ -28,15 +28,21 @@ class Interpreter {
         return { handled: false };
     }
 
-    // M100 <reg_a><reg_b><reg_dest>  – set dest = midpoint(a, b)
-    // Example: M100 G56XG57XG54X
+    // M100 midpoint. Supports both:
+    //   legacy compact form used by probe files: M100 G56XG57XG54X
+    //   spaced form used in docs:               M100 G54X G55X G56X
     _m100(line) {
-        const m = line.match(/M100\s+(G5[4-9][XYZ])(G5[4-9][XYZ])(G5[4-9][XYZ])/i);
-        if (!m) return { handled: true, gcodesToSend: [] };
+        const compact = line.match(/M100\s+(G5[4-9][XYZ])(G5[4-9][XYZ])(G5[4-9][XYZ])/i);
+        const spaced = line.match(/M100\s+(G5[4-9][XYZ])\s+(G5[4-9][XYZ])\s+(G5[4-9][XYZ])$/i);
+        if (!compact && !spaced) return { handled: true, gcodesToSend: [] };
 
-        const a = this.memory.getRegister(m[1].toUpperCase());
-        const b = this.memory.getRegister(m[2].toUpperCase());
-        const dest = m[3].toUpperCase();
+        const refs = compact
+            ? { a: compact[1].toUpperCase(), b: compact[2].toUpperCase(), dest: compact[3].toUpperCase() }
+            : { dest: spaced[1].toUpperCase(), a: spaced[2].toUpperCase(), b: spaced[3].toUpperCase() };
+
+        const a = this.memory.getRegister(refs.a);
+        const b = this.memory.getRegister(refs.b);
+        const dest = refs.dest;
         const val = (a + b) / 2;
 
         this.memory.setRegister(dest, val);
@@ -129,7 +135,8 @@ class Interpreter {
             mem.getRegister(match.toUpperCase())
         );
 
-        // Transform if(cond, trueVal, falseVal) -> (cond ? trueVal : falseVal)
+        // DDcut if(COND, A, B) follows standard convention:
+        // evaluates to A when COND is true, otherwise B.
         js = this._transformIf(js);
 
         // Logic keywords
@@ -146,7 +153,7 @@ class Interpreter {
         return Function('"use strict"; return (' + js + ');')();
     }
 
-    // Recursively transform all if(cond, a, b) -> (cond ? a : b)
+    // Recursively transform DDcut if(cond, a, b) -> (cond ? b : a)
     _transformIf(expr) {
         let result = '';
         let i = 0;
@@ -176,9 +183,9 @@ class Interpreter {
 
                 if (args.length === 3) {
                     const cond = this._transformIf(args[0]);
-                    const tval = this._transformIf(args[1]);
-                    const fval = this._transformIf(args[2]);
-                    result += `(${cond} ? ${tval} : ${fval})`;
+                    const trueBranch = this._transformIf(args[1]);
+                    const falseBranch = this._transformIf(args[2]);
+                    result += `(${cond} ? ${trueBranch} : ${falseBranch})`;
                 } else {
                     // Malformed – pass through unchanged
                     result += expr.slice(i, j + 1);

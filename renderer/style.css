@@ -140,6 +140,20 @@ body {
     min-width: 200px;
 }
 
+#fw-status {
+    font-size: 11px;
+    min-width: 120px;
+    color: var(--muted);
+}
+
+#fw-status.fw-ok {
+    color: var(--success);
+}
+
+#fw-status.fw-bad {
+    color: var(--warn);
+}
+
 /* Body */
 #body {
     flex: 1;
@@ -164,6 +178,38 @@ body {
     display: flex;
     flex-direction: column;
     gap: 8px;
+}
+
+.state-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 0;
+}
+
+.state-label {
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.state-value {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    text-align: right;
+}
+
+.state-value.state-empty {
+    color: var(--muted);
+}
+
+.state-value.state-ok {
+    color: var(--success);
+}
+
+.state-value.state-warn {
+    color: var(--warn);
 }
 
 .section-title {
@@ -289,6 +335,7 @@ body {
     text-align: left;
     transition: background .1s, border-color .1s;
 }
+
 
 .btn-step:hover:not(:disabled) {
     background: var(--accent-dk);
@@ -769,6 +816,10 @@ body {
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--muted);
+}
+
+#lib-path-display.lib-invalid {
+    color: var(--warn);
 }
 
 .lib-prompt {

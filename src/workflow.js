@@ -3,8 +3,21 @@
 const fs = require('fs');
 const path = require('path');
 const EventEmitter = require('events');
+const { normalizeLibraryGcodeLine } = require('./library-compat');
 
 const DDCUT_MCODE = /^M(100|101|102|106|107|108)\b/i;
+const MIN_FW_VERSION = 20220800;
+const SLIDE_TYPE_CODES = {
+    'G17/19/26': 1,
+    'G43/48': 2,
+    '1911': 3,
+    'P320': 4,
+    'G20': 5,
+    'M&P2.0': 6,
+};
+const CODE_TO_SLIDE_KEY = Object.fromEntries(
+    Object.entries(SLIDE_TYPE_CODES).map(([key, code]) => [code, key])
+);
 
 // ── Static data tables ──────────────────────────────────────────────────────
 
@@ -68,7 +81,7 @@ const SLIDE_TYPES = {
         configure: 'Code/Slide_Configs/G17-19-26_configure.gcode',
         installNote: SLIDE_INSTALL_NOTES.glock,
         footprints: ['RMR', 'Docter', 'MOS', 'RMS', 'RMRcc', 'Viper', 'Razor', 'DPP'],
-        rearOnly: [],
+        rearOnly: ['MOS'],
     },
     'G43/48': {
         label: 'Glock 43/48',
@@ -109,7 +122,7 @@ const SLIDE_TYPES = {
         probe: 'Code/Slide_Probing/G20 Slide Probe 1.5 - 2.5 OAL.nc',
         configure: 'Code/Slide_Configs/G20_configure.gcode',
         installNote: SLIDE_INSTALL_NOTES.glock,
-        footprints: ['RMR', 'Docter', 'MOS', 'RMS', 'RMRcc', 'Viper', 'Razor', 'DPP'],
+        footprints: ['RMR', 'Docter', 'RMS', 'RMRcc', 'Viper', 'Razor', 'DPP'],
         rearOnly: [],
     },
     'M&P2.0': {
@@ -128,7 +141,7 @@ const FOOTPRINTS = {
     'RMR': { label: 'RMR / Holosun 407C·507C', configs: { Rear: 'Code/Footprint_Configs/rmr_rear_config.gcode', Standard: 'Code/Footprint_Configs/rmr_standard_config.gcode' }, mill: 'Code/Footprint_Milling/rmr_5-32.gcode' },
     'Docter': { label: 'Docter / Vortex Venom', configs: { Rear: 'Code/Footprint_Configs/docter_rear_config.gcode', Standard: 'Code/Footprint_Configs/docter_standard_config.gcode' }, mill: 'Code/Footprint_Milling/docter_5-32.gcode' },
     'MOS': {
-        label: 'MOS / Holosun SCS', configs: { Rear: 'Code/Footprint_Configs/mos_rear_config.gcode', Standard: 'Code/Footprint_Configs/mos_standard_config.gcode' }, mill: 'Code/Footprint_Milling/mos_5-32.gcode',
+        label: 'MOS / Holosun SCS', configs: { Rear: 'Code/Footprint_Configs/mos_rear_config.gcode' }, mill: 'Code/Footprint_Milling/mos_5-32.gcode',
         configs1911: { Rear: 'Code/Footprint_Configs/mos_1911_rear_config.gcode', Standard: 'Code/Footprint_Configs/mos_1911_standard_config.gcode' }, mill1911: 'Code/Footprint_Milling/1911_mos_platform_5-32.gcode'
     },
     'RMS': { label: 'RMS·RMSc / Sig Romeo Zero', configs: { Rear: 'Code/Footprint_Configs/rms_rear_config.gcode', Standard: 'Code/Footprint_Configs/rms_standard_config.gcode' }, mill: 'Code/Footprint_Milling/rms_5-32.gcode' },
@@ -163,6 +176,7 @@ function buildHoleSequence(holeType) {
         { type: 'gcode', text: 'Moving to tool change position', file: 'Code/tool_change.gcode' },
         { type: 'instruction', text: `Install 1/16" endmill. Push it all the way in, tighten collet, re-attach chip fan.`, image: 'Image/DSC09761.jpg' },
         { type: 'gcode', text: 'Z probing with 1/16" endmill', file: 'Code/Slide_Probing/Z Reprobe 1.5 - 2.5 OAL.nc' },
+        { type: 'instruction', text: 'Confirm the 1/16" endmill made good contact during Z probe. If you did not hear or see probe contact, clean the tool and clamp, then abort and rerun before continuing.', image: 'Image/_DSC9721.jpg' },
         { type: 'gcode', text: 'Setting left hole position', file: 'Code/Hole_Cutting/set_left_hole.gcode' },
         { type: 'gcode', text: `Boring left hole (${t})`, file: borefile },
         { type: 'gcode', text: 'Setting right hole position', file: 'Code/Hole_Cutting/set_right_hole.gcode' },
@@ -171,6 +185,7 @@ function buildHoleSequence(holeType) {
         { type: 'instruction', text: `Remove 1/16" endmill. Install ${toolLabel}. Push all the way in and tighten.`, image: null },
         // Z reprobe is required after installing the threadmill — it has a different tool length than the 1/16" endmill.
         { type: 'gcode', text: 'Z probing with threadmill', file: 'Code/Slide_Probing/Z Reprobe 1.5 - 2.5 OAL.nc' },
+        { type: 'instruction', text: 'Confirm the threadmill made good contact during Z probe. If contact looked wrong, clean the tool and clamp, then abort and rerun before continuing.', image: 'Image/_DSC9726.jpg' },
         { type: 'gcode', text: 'Setting left hole position', file: 'Code/Hole_Cutting/set_left_hole.gcode' },
         { type: 'gcode', text: `Threading left hole (${t})`, file: threadfile },
         { type: 'gcode', text: 'Setting right hole position', file: 'Code/Hole_Cutting/set_right_hole.gcode' },
@@ -235,7 +250,18 @@ class WorkflowEngine extends EventEmitter {
     }
 
     getState() {
-        return { phase: this.phase, slideKey: this.slideKey, running: this.running, devMode: this.devMode, held: this._held };
+        const configuredSlideKey = this._getConfiguredSlideKey();
+        return {
+            phase: this.phase,
+            slideKey: this.slideKey,
+            slideLabel: this.slideKey ? SLIDE_TYPES[this.slideKey]?.label || this.slideKey : null,
+            configuredSlideKey,
+            configuredSlideLabel: configuredSlideKey ? SLIDE_TYPES[configuredSlideKey]?.label || configuredSlideKey : null,
+            configuredSlideMatches: configuredSlideKey ? configuredSlideKey === this.slideKey : null,
+            running: this.running,
+            devMode: this.devMode,
+            held: this._held,
+        };
     }
 
     // ── Slide selection ──────────────────────────────────────────────────────
@@ -253,6 +279,7 @@ class WorkflowEngine extends EventEmitter {
         if (!SLIDE_TYPES[slideKey]) return;
         this.slideKey = slideKey;
         this.phase = 'idle';
+        this.memory.reset();
         this._emitState();
     }
 
@@ -261,9 +288,12 @@ class WorkflowEngine extends EventEmitter {
     async runPosition() {
         const slide = this._requireSlide();
         if (!slide) return;
+        const ready = await this._preflightCheck({ allowAlarm: true });
+        if (!ready) return;
 
         // Move endmill to slide-loading position (bumped against slide for X reference)
-        await this._runFile(slide.position, 'Moving to slide loading position…');
+        const positionResult = await this._runFile(slide.position, 'Moving to slide loading position…');
+        if (positionResult?.error) return;
         if (this._aborted) return;
 
         // Pause: user installs slide, soft jaws, probe eyelet, verifies conductivity
@@ -271,7 +301,8 @@ class WorkflowEngine extends EventEmitter {
         if (aborted) return;
 
         // Retract endmill from slide so Z probe can start
-        await this._runFile(slide.retract, 'Retracting from slide…');
+        const retractResult = await this._runFile(slide.retract, 'Retracting from slide…');
+        if (retractResult?.error) return;
         if (!this._aborted) {
             this.phase = 'positioned';
             this._emitState();
@@ -279,10 +310,34 @@ class WorkflowEngine extends EventEmitter {
         }
     }
 
+    async runToolChange() {
+        const ready = await this._preflightCheck({ allowAlarm: true });
+        if (!ready) return;
+
+        this.emit('step', { index: 1, total: 1, text: 'Moving to tool change position…' });
+        const result = await this._runFile('Code/tool_change.gcode', 'Moving to tool change position…');
+        if (result?.error || this._aborted) return;
+
+        this.emit('gcode:done', { ok: true, action: 'tool-change' });
+    }
+
     async runProbe() {
         const slide = this._requireSlide();
         if (!slide) return;
-        await this._runFile(slide.probe, 'Probing slide…');
+        if (this.phase === 'idle') {
+            this.emit('gcode:done', { error: 'Run Position before Probe.' });
+            return;
+        }
+        const ready = await this._preflightCheck({ allowAlarm: true });
+        if (!ready) return;
+        const probeResult = await this._runFile(slide.probe, 'Probing slide…');
+        if (probeResult?.error) return;
+        if (this._aborted) return;
+        const aborted = await this._waitForContinue(
+            'Confirm the slide probe made good contact. If you did not hear or see contact with the slide or clamp, abort, clean the contact surfaces, and rerun Probe.',
+            'Image/_DSC9721.jpg'
+        );
+        if (aborted) return;
         if (!this._aborted) {
             this.phase = 'probed';
             this._emitState();
@@ -293,7 +348,14 @@ class WorkflowEngine extends EventEmitter {
     async runConfigure() {
         const slide = this._requireSlide();
         if (!slide) return;
-        await this._runFile(slide.configure, 'Configuring work coordinates…');
+        if (this.phase !== 'probed' && this.phase !== 'ready') {
+            this.emit('gcode:done', { error: 'Run Probe before Configure.' });
+            return;
+        }
+        const ready = await this._preflightCheck();
+        if (!ready) return;
+        const configureResult = await this._runFile(slide.configure, 'Configuring work coordinates…');
+        if (configureResult?.error) return;
         if (!this._aborted) {
             this.phase = 'ready';
             this._emitState();
@@ -307,6 +369,13 @@ class WorkflowEngine extends EventEmitter {
         const slide = this._requireSlide();
         const fp = FOOTPRINTS[fpKey];
         if (!slide || !fp) return;
+        if (this.phase !== 'ready') {
+            this.emit('gcode:done', { error: 'Run Configure before milling a footprint.' });
+            return;
+        }
+        if (!this._validateConfiguredSlide()) return;
+        const ready = await this._preflightCheck();
+        if (!ready) return;
 
         const is1911 = !!SLIDE_TYPES[this.slideKey].is1911;
         const cfgFile = (is1911 && fp.configs1911) ? fp.configs1911[position] : fp.configs[position];
@@ -337,13 +406,22 @@ class WorkflowEngine extends EventEmitter {
         }
         if (!this._aborted) {
             // Home the machine after completing the footprint cut
-            await this._runFile('Code/home.gcode', 'Homing machine…');
+            const homeResult = await this._runFile('Code/home.gcode', 'Homing machine…');
+            if (homeResult?.error) return;
             this.emit('gcode:done', { ok: true });
         }
     }
 
     async runHoles(holeType) {
-        this._requireSlide();
+        const slide = this._requireSlide();
+        if (!slide) return;
+        if (this.phase !== 'ready') {
+            this.emit('gcode:done', { error: 'Run Configure before drilling or tapping holes.' });
+            return;
+        }
+        if (!this._validateConfiguredSlide()) return;
+        const ready = await this._preflightCheck();
+        if (!ready) return;
         if (this._aborted) return;
 
         const steps = buildHoleSequence(holeType);
@@ -364,7 +442,8 @@ class WorkflowEngine extends EventEmitter {
         }
         if (!this._aborted) {
             // Home the machine after completing the threading operation
-            await this._runFile('Code/home.gcode', 'Homing machine…');
+            const homeResult = await this._runFile('Code/home.gcode', 'Homing machine…');
+            if (homeResult?.error) return;
             this.emit('gcode:done', { ok: true });
         }
     }
@@ -399,6 +478,7 @@ class WorkflowEngine extends EventEmitter {
     }
 
     abort() {
+        if (!this.running) return;
         this._aborted = true;
         // Wake the held send loop so it can exit
         if (this._held) {
@@ -443,6 +523,104 @@ class WorkflowEngine extends EventEmitter {
         });
     }
 
+    _validateLibrary() {
+        if (!this.libPath) {
+            return { ok: false, error: 'No library selected.' };
+        }
+        if (!fs.existsSync(this.libPath)) {
+            return { ok: false, error: 'Library folder not found.' };
+        }
+        if (!fs.statSync(this.libPath).isDirectory()) {
+            return { ok: false, error: 'Library path is not a folder.' };
+        }
+        if (!fs.existsSync(path.join(this.libPath, 'Code'))) {
+            return { ok: false, error: 'Library is missing the Code folder.' };
+        }
+        return { ok: true };
+    }
+
+    async _preflightCheck(options = {}) {
+        const { allowAlarm = false } = options;
+        const lib = this._validateLibrary();
+        if (!lib.ok) {
+            this.emit('gcode:done', { error: lib.error });
+            return false;
+        }
+
+        if (this.devMode) return true;
+
+        if (!this.serial.connected) {
+            this.emit('gcode:done', { error: 'Not connected to machine.' });
+            return false;
+        }
+
+        let firmware = this.serial.getFirmwareInfo();
+        if (!firmware.fwVersion) {
+            try {
+                firmware = await this.serial.queryBuildInfo();
+            } catch (_) {
+                firmware = this.serial.getFirmwareInfo();
+            }
+        }
+        if (!firmware.detected) {
+            this.emit('gcode:done', { error: 'Unable to detect machine firmware. Reconnect and verify the controller responds to $I.' });
+            return false;
+        }
+        if (firmware.fwVersion !== null && firmware.fwVersion < MIN_FW_VERSION) {
+            this.emit('gcode:done', { error: `Firmware ${firmware.fwVersion} is below required ${MIN_FW_VERSION}.` });
+            return false;
+        }
+
+        let status;
+        try {
+            status = await this.serial.queryStatus();
+        } catch (e) {
+            this.emit('gcode:done', { error: `Unable to read machine status: ${e.message}` });
+            return false;
+        }
+
+        const state = String(status.state || 'Unknown').split(':')[0];
+        if (state === 'Alarm') {
+            if (allowAlarm) {
+                // Unlock the alarm so subsequent G-code can run.
+                // $H in the file will home if enabled; if homing is disabled,
+                // $X is the only way to clear the lock.
+                try { await this.serial.send('$X'); } catch (_) { /* best-effort */ }
+                return true;
+            }
+            this.emit('gcode:done', { error: 'Machine is in Alarm. Clear the alarm before starting.' });
+            return false;
+        }
+        if (state !== 'Idle') {
+            this.emit('gcode:done', { error: `Machine must be Idle before starting. Current state: ${status.state}.` });
+            return false;
+        }
+
+        return true;
+    }
+
+    _validateConfiguredSlide() {
+        const expected = SLIDE_TYPE_CODES[this.slideKey];
+        const configured = this.memory.getNamed('slide_type');
+
+        if (!expected) return true;
+        if (configured === expected) return true;
+
+        const label = SLIDE_TYPES[this.slideKey]?.label || this.slideKey;
+        if (!configured) {
+            this.emit('gcode:done', { error: `Slide ${label} is selected, but no slide configuration is loaded. Run Configure again before cutting.` });
+            return false;
+        }
+
+        this.emit('gcode:done', { error: `Selected slide is ${label}, but the loaded configuration belongs to a different slide. Re-run Position, Probe, and Configure before cutting.` });
+        return false;
+    }
+
+    _getConfiguredSlideKey() {
+        const code = this.memory.getNamed('slide_type');
+        return CODE_TO_SLIDE_KEY[code] || null;
+    }
+
     /**
      * Run a single gcode file through the interpreter/serial pipeline.
      * Emits 'gcode:line' per meaningful output line.
@@ -460,6 +638,12 @@ class WorkflowEngine extends EventEmitter {
         }
 
         const lines = fs.readFileSync(full, 'utf8').replace(/\r\n/g, '\n').split('\n');
+
+        return this._runLines(lines.map(sourceLine => normalizeLibraryGcodeLine(relPath, sourceLine)), _label);
+    }
+
+    async _runLines(lines, _label) {
+        if (this._aborted) return { error: 'Aborted' };
 
         for (const rawLine of lines) {
             if (this._aborted) return { error: 'Aborted' };
@@ -512,6 +696,8 @@ class WorkflowEngine extends EventEmitter {
                     if (this._aborted) return { error: 'Aborted' };
                     // $ system commands (e.g. $H, $L, $HZ) require GRBL to be IDLE.
                     // Wait for the machine to finish any queued motion before sending.
+                    // waitForIdle() resolves for both Idle and Alarm, so $H still
+                    // works when clearing an alarm (no motion to wait on).
                     if (stripped.startsWith('$')) {
                         await this.serial.waitForIdle();
                         if (this._aborted) return { error: 'Aborted' };
@@ -530,6 +716,7 @@ class WorkflowEngine extends EventEmitter {
         // Sync WCS from machine after file completes
         if (!this.devMode) {
             try {
+                await this.serial.waitForIdle();
                 const hashLines = await this.serial.queryHash();
                 this.memory.syncFromHashResponse(hashLines);
             } catch (_) { /* non-fatal */ }
@@ -537,15 +724,17 @@ class WorkflowEngine extends EventEmitter {
 
         return { ok: true };
     }
-
-    // Reset running state (call at start of each public run method)
+    // Reset running state (call at start of each public run method).
+    // Returns false if already running — callers must check and bail.
     _beginRun() {
+        if (this.running) return false;
         this._aborted = false;
         this._held = false;
         this._holdPromise = null;
         this._holdResolve = null;
         this.running = true;
         this._emitState();
+        return true;
     }
 
     _endRun() {

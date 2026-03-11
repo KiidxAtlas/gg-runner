@@ -11,6 +11,8 @@ const { WorkflowEngine } = require('./src/workflow');
 
 // ── Settings persistence ─────────────────────────────────────────────────────
 
+const MIN_FW_VERSION = 20220800;
+
 const SETTINGS_PATH = path.join(app.getPath('userData'), 'gg-runner-settings.json');
 
 function loadSettings() {
@@ -23,13 +25,40 @@ function saveSettings(updates) {
     fs.writeFileSync(SETTINGS_PATH, JSON.stringify({ ...current, ...updates }, null, 2));
 }
 
-let libPath = loadSettings().libPath || '';
+function validateLibPath(candidate) {
+    if (!candidate) return { ok: false, path: '', error: 'No library selected' };
+    if (!fs.existsSync(candidate)) return { ok: false, path: candidate, error: 'Library folder not found' };
+    if (!fs.statSync(candidate).isDirectory()) return { ok: false, path: candidate, error: 'Library path is not a folder' };
+    if (!fs.existsSync(path.join(candidate, 'Code'))) return { ok: false, path: candidate, error: 'Library is missing the Code folder' };
+    if (!fs.existsSync(path.join(candidate, 'manifest.yml'))) return { ok: false, path: candidate, error: 'Library is missing manifest.yml' };
+    return { ok: true, path: candidate };
+}
+
+const loadedSettings = loadSettings();
+let libPath = loadedSettings.libPath || '';
+if (libPath && !validateLibPath(libPath).ok) {
+    libPath = '';
+    saveSettings({ libPath: '' });
+}
 
 let mainWindow;
 const memory = new Memory();
 const interpreter = new Interpreter(memory);
 const serial = new SerialManager();
 const workflow = new WorkflowEngine(libPath, memory, interpreter, serial);
+
+function summarizeFirmware(info, error) {
+    const detected = !!(info?.detected || (info?.rawLines && info.rawLines.length) || (info?.versionText && info.versionText !== 'Unknown'));
+    const compatible = info?.fwVersion !== null && info?.fwVersion !== undefined
+        ? info.fwVersion >= MIN_FW_VERSION
+        : detected;
+    return {
+        ...info,
+        detected,
+        compatible,
+        error,
+    };
+}
 
 // ── Window ──────────────────────────────────────────────────────────────────
 
@@ -61,6 +90,7 @@ app.whenReady().then(() => {
 
     // ── Forward serial events to renderer ───
     serial.on('status', (s) => mainWindow?.webContents.send('machine:status', s));
+    serial.on('firmware', (s) => mainWindow?.webContents.send('machine:firmware', summarizeFirmware(s)));
     serial.on('line', (l) => mainWindow?.webContents.send('machine:line', l));
     serial.on('alarm', (a) => mainWindow?.webContents.send('machine:alarm', a));
     serial.on('disconnect', () => mainWindow?.webContents.send('machine:disconnect'));
@@ -89,7 +119,18 @@ ipcMain.handle('serial:list', async () => {
 });
 
 ipcMain.handle('serial:connect', async (_, portPath) => {
-    try { await serial.connect(portPath); return { ok: true }; }
+    try {
+        await serial.connect(portPath);
+        let firmware;
+        try {
+            const info = await serial.queryBuildInfo();
+            firmware = summarizeFirmware(info);
+        } catch (e) {
+            const info = serial.getFirmwareInfo();
+            firmware = summarizeFirmware(info, e.message);
+        }
+        return { ok: true, firmware };
+    }
     catch (e) { return { error: e.message }; }
 });
 
@@ -106,6 +147,11 @@ ipcMain.handle('serial:send', async (_, line) => {
 ipcMain.handle('serial:realtime', (_, code) => {
     serial.sendRaw(code);  // code is a number (byte) or single-char string
     return { ok: true };
+});
+
+ipcMain.handle('serial:firmware', () => {
+    const info = serial.getFirmwareInfo();
+    return summarizeFirmware(info);
 });
 
 // ── Workflow info (sync) ─────────────────────────────────────────────────────
@@ -125,31 +171,37 @@ ipcMain.handle('workflow:setSlide', (_, slideKey) => {
 // Fire-and-forget: IPC returns immediately, progress comes via events.
 
 ipcMain.handle('workflow:position', () => {
-    workflow._beginRun();
+    if (!workflow._beginRun()) return { error: 'A workflow is already running.' };
     workflow.runPosition().catch(console.error);
     return { ok: true };
 });
 
+ipcMain.handle('workflow:toolChange', () => {
+    if (!workflow._beginRun()) return { error: 'A workflow is already running.' };
+    workflow.runToolChange().catch(console.error);
+    return { ok: true };
+});
+
 ipcMain.handle('workflow:probe', () => {
-    workflow._beginRun();
+    if (!workflow._beginRun()) return { error: 'A workflow is already running.' };
     workflow.runProbe().catch(console.error);
     return { ok: true };
 });
 
 ipcMain.handle('workflow:configure', () => {
-    workflow._beginRun();
+    if (!workflow._beginRun()) return { error: 'A workflow is already running.' };
     workflow.runConfigure().catch(console.error);
     return { ok: true };
 });
 
 ipcMain.handle('workflow:runFootprint', (_, { fp, position, depth }) => {
-    workflow._beginRun();
+    if (!workflow._beginRun()) return { error: 'A workflow is already running.' };
     workflow.runFootprint(fp, position, depth).catch(console.error);
     return { ok: true };
 });
 
 ipcMain.handle('workflow:runHoles', (_, holeType) => {
-    workflow._beginRun();
+    if (!workflow._beginRun()) return { error: 'A workflow is already running.' };
     workflow.runHoles(holeType).catch(console.error);
     return { ok: true };
 });
@@ -187,6 +239,7 @@ ipcMain.handle('memory:dump', () => ({
 // ── Library path ─────────────────────────────────────────────────────────────
 
 ipcMain.handle('lib:getPath', () => libPath);
+ipcMain.handle('lib:getStatus', () => validateLibPath(libPath));
 
 ipcMain.handle('lib:browse', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -195,7 +248,9 @@ ipcMain.handle('lib:browse', async () => {
         properties: ['openDirectory'],
     });
     if (result.canceled || !result.filePaths[0]) return { ok: false };
-    libPath = result.filePaths[0];
+    const validation = validateLibPath(result.filePaths[0]);
+    if (!validation.ok) return { ok: false, error: validation.error, path: validation.path };
+    libPath = validation.path;
     saveSettings({ libPath });
     workflow.setLibPath(libPath);
     return { ok: true, path: libPath };

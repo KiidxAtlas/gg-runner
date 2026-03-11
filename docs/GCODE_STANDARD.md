@@ -147,7 +147,7 @@ math expression.
 | `floor(X)` | Round down to integer |
 | `abs(X)` | Absolute value |
 | `sqrt(X)` | Square root |
-| `if(COND, TRUE_VAL, FALSE_VAL)` | Conditional — returns TRUE_VAL when COND is non-zero, else FALSE_VAL |
+| `if(COND, A, B)` | Production-library conditional — returns `B` when COND is non-zero, else `A` |
 | `or` `and` | Logical operators (use inside `if` conditions) |
 | `==` `!=` `>` `<` `>=` `<=` | Comparison operators (result is 1 or 0) |
 
@@ -175,19 +175,27 @@ message is displayed to the operator.
 
 #### The standard sanity-check pattern
 
-Always use this two-line pattern:
+In the active GG/GG3 optic-cut library, sanity checks use this two-line pattern:
 
 ```gcode
 M102 G58Y if((CONDITION_IS_CORRECT), 0, 1)
-M106 G58Y == 1 Error: Your message here.
+M106 G58Y == 0 Error: Your message here.
 ```
 
-- The `if()` stores **0** when the condition is **correct** (OK to continue).
-- The `if()` stores **1** when the condition is **wrong** (should halt).
-- `M106 G58Y == 1` fires (halts) when G58Y is 1 — i.e. when something is wrong.
+- Under the production-library `if()` convention, `if(correct, 0, 1)` stores **1** when the condition is **correct** and **0** when the condition is **wrong**.
+- `M106 G58Y == 0` therefore fires only on the bad path.
 
-**Why G58Y == 1, not == 0?**  Because `if(correct, 0, 1)` puts 0 in G58Y when
-we are correct.  Firing on 0 would halt when everything is fine — backwards.
+This is not mathematically intuitive, but it matches the active `Footprint_Configs` and `Depth_Setting` files shipped in the reference library and is the convention GG Runner executes.
+
+#### Standalone manifest sanity-check jobs
+
+The external library also ships standalone jobs under `Code/Sanity_Checks/`. The footprint-specific files in that folder are internally inconsistent with the active workflow files in three specific ways:
+
+- their initial `cut_configured` guard checks `G58X == 1` where the file logic requires `G58X == 0`
+- their secondary allowed-footprint check compares some footprint codes against `G58Z` instead of `G58X`
+- their final footprint-mismatch `M106` still uses `== 1` instead of the active `== 0` convention
+
+GG Runner normalizes those known quirks when it loads the footprint-specific standalone sanity files so the manifest jobs behave consistently with the active workflow files.
 
 **Example — block a footprint on a wrong slide:**
 ```gcode
@@ -196,7 +204,7 @@ M108 G58Z sanity_checks_disabled
 
 (Only allowed on G17/19/26 and G20)
 M102 G58Y if((((G58X == 1) or (G58X == 5) or (G58Z == 1))), 0, 1)
-M106 G58Y == 1 Error: This footprint can only be milled on G17/19/26 or G20 slides.
+M106 G58Y == 0 Error: This footprint can only be milled on G17/19/26 or G20 slides.
 ```
 
 Conditions in the `if()`:
@@ -204,12 +212,12 @@ Conditions in the `if()`:
 - `G58X == 5` → also correct (G20)
 - `G58Z == 1` → sanity checks disabled, always pass
 
-Any of these being true makes the overall condition true → 0 stored → no halt.
+Any of these being true makes the overall condition true → 1 stored → no halt.
 
 **Example — restrict to 1911 only:**
 ```gcode
 M102 G58Y if((((G58X == 3) or (G58Z == 1))), 0, 1)
-M106 G58Y == 1 Error: This cut can only be milled on a 1911 slide.
+M106 G58Y == 0 Error: This cut can only be milled on a 1911 slide.
 ```
 
 ---
@@ -376,7 +384,7 @@ M108 G58Z sanity_checks_disabled
 
 (3. Sanity check — block wrong slide types)
 M102 G58Y if((( VALID_SLIDE_CONDITION or (G58Z == 1) )), 0, 1)
-M106 G58Y == 1 Error: Your error message explaining which slides are valid. If you wish to override, run the "Disable Sanity Checking" job and return to this job.
+M106 G58Y == 0 Error: Your error message explaining which slides are valid. If you wish to override, run the "Disable Sanity Checking" job and return to this job.
 
 (Repeat block above for each additional slide-type restriction)
 
@@ -396,7 +404,7 @@ M102 G56Y G54Y+(HOLE_OFFSET_Y * 25.4)
 - Always start with `G21`.
 - Always put the `M102 G54Y` computation **before** the sanity checks.
 - Use `G58Y` as the scratch register for all `if()` / M106 tests.
-- The M106 line must use `== 1` — **never** `== 0`.
+- The active workflow convention is `M106 ... == 0`.
 - If the footprint is only valid on **one specific slide**, the VALID_SLIDE_CONDITION
   is `(G58X == SLIDE_TYPE_VALUE)`.
 - If the footprint is **blocked on one specific slide**, the VALID_SLIDE_CONDITION
@@ -417,11 +425,11 @@ M108 G58Z sanity_checks_disabled
 
 (Block Glock 43/48 — slide_type 2)
 M102 G58Y if((((G58X != 2) or (G58Z == 1))), 0, 1)
-M106 G58Y == 1 Error: RMR Standard cannot be milled on a Glock 43/48 slide.
+M106 G58Y == 0 Error: RMR Standard cannot be milled on a Glock 43/48 slide.
 
 (Block 1911 — slide_type 3)
 M102 G58Y if((((G58X != 3) or (G58Z == 1))), 0, 1)
-M106 G58Y == 1 Error: RMR Standard cannot be milled on a 1911 slide.
+M106 G58Y == 0 Error: RMR Standard cannot be milled on a 1911 slide.
 
 M107 footprint_type 1
 
@@ -447,7 +455,7 @@ M108 G58Z sanity_checks_disabled
 
 (Only valid on 1911 — slide_type 3)
 M102 G58Y if((((G58X == 3) or (G58Z == 1))), 0, 1)
-M106 G58Y == 1 Error: This cut can only be milled on a 1911 slide.
+M106 G58Y == 0 Error: This cut can only be milled on a 1911 slide.
 
 M107 footprint_type 16
 
@@ -510,9 +518,15 @@ In the `FOOTPRINTS` table at the top of `src/workflow.js`, add a new entry:
     mill: 'Code/Footprint_Milling/my_footprint.gcode',
 },
 ```
+    #### Standalone manifest sanity-check jobs
 
-If the footprint has a different pocket for 1911 slides, add:
+    The external library also ships standalone jobs under `Code/Sanity_Checks/`. The footprint-specific files in that folder are internally inconsistent with the active workflow files in three specific ways:
 
+    - their initial `cut_configured` guard checks `G58X == 1` where the file logic requires `G58X == 0`
+    - their secondary allowed-footprint check compares some footprint codes against `G58Z` instead of `G58X`
+    - their final footprint-mismatch `M106` still uses `== 1` instead of the active `== 0` convention
+
+    GG Runner normalizes those known quirks when it loads the footprint-specific standalone sanity files so the manifest jobs behave consistently with the active workflow files.
 ```javascript
 configs1911: {
     Rear:     'Code/Footprint_Configs/my_footprint_1911_rear_config.gcode',
@@ -588,7 +602,7 @@ to that footprint's config file:
 ```gcode
 (Block MySlide — slide_type N)
 M102 G58Y if((((G58X != N) or (G58Z == 1))), 0, 1)
-M106 G58Y == 1 Error: This footprint cannot be milled on MySlide slides.
+M106 G58Y == 0 Error: This footprint cannot be milled on MySlide slides.
 ```
 
 For footprints that are **only** valid on certain slides and your new slide
@@ -599,17 +613,18 @@ qualifies, add `(G58X == N)` as an additional `or` condition to the existing
 
 ## 11. Common Pitfalls
 
-### M106 must use == 1, never == 0
+### Active workflow files use M106 == 0
 
-The `if()` pattern stores 0 when correct and 1 when wrong:
+The active config/depth workflow in the reference library uses the production DDcut pattern below:
 
 ```gcode
 M102 G58Y if((CONDITION_OK), 0, 1)
-M106 G58Y == 1 Error: ...   ← CORRECT — fires when wrong
-M106 G58Y == 0 Error: ...   ← WRONG — fires when everything is fine
+M106 G58Y == 0 Error: ...   ← active-library convention
 ```
 
-Every config file in Footprint_Configs **and** in Depth_Setting uses `== 1`.  Never write `== 0`.
+Every active config file in `Footprint_Configs` and `Depth_Setting` uses `== 0`, and GG Runner follows that convention.
+
+The footprint-specific standalone jobs in `Code/Sanity_Checks/` still carry a broken `cut_configured` comparison, `G58Z`/`G58X` footprint-code typos, and an older `M106 == 1` mismatch check. GG Runner rewrites those exact quirks at load time for compatibility, but new config/depth/job files should follow the active `== 0` convention.
 
 ### G59X/Y/Z must never be written after probing
 

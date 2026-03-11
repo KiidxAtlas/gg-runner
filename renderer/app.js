@@ -52,7 +52,10 @@ const portSelect = $('port-select');
 const btnRefresh = $('btn-refresh');
 const btnConnect = $('btn-connect');
 const connStatus = $('conn-status');
+const fwStatus = $('fw-status');
 const machinePos = $('machine-pos');
+const selectedSlideState = $('selected-slide-state');
+const configuredSlideState = $('configured-slide-state');
 const slideRadios = $('slide-radios');
 const btnPosition = $('btn-position');
 const btnProbe = $('btn-probe');
@@ -76,6 +79,7 @@ const depthSelect = $('depth-select');
 const btnRunFp = $('btn-run-fp');
 const holeSelect = $('hole-select');
 const btnRunHoles = $('btn-run-holes');
+const btnToolChange = $('btn-tool-change');
 const outputLog = $('output-log');
 const manualIn = $('manual-in');
 const btnSendManual = $('btn-send-manual');
@@ -162,6 +166,8 @@ async function onSlideChange(slideKey) {
     await window.gg.setSlide(slideKey);
     await refreshFootprints(slideKey);
     await refreshDepths(slideKey);
+    workflowState = await window.gg.getState();
+    updateSlideStateSummary();
     updateButtonStates();
 }
 
@@ -217,13 +223,15 @@ function updateButtonStates() {
     const canSetup = active && hasSlide && !running && !!currentLibPath;
     const isReady = phase === 'ready';
     const canCut = active && isReady && !running;
+    const canManualMachineMove = active && !running && !!currentLibPath;
     // Configure requires probe to have been run at least once
     const canConfigure = canSetup && (phase === 'probed' || phase === 'ready');
 
     btnPosition.disabled = !canSetup;
-    btnProbe.disabled = !canSetup;
+    btnProbe.disabled = !canSetup || phase === 'idle';
     btnConfigure.disabled = !canConfigure;
     btnAbort.classList.toggle('hidden', !running);
+    btnToolChange.disabled = !canManualMachineMove;
 
     // Right cut panel
     const locked = !canCut;
@@ -231,6 +239,26 @@ function updateButtonStates() {
     holeSection.classList.toggle('locked', locked);
     btnRunFp.disabled = locked || !fpSelect.value || !depthSelect.value;
     btnRunHoles.disabled = locked;
+}
+
+function updateSlideStateSummary() {
+    const selected = workflowState.slideLabel || 'None';
+    const configured = workflowState.configuredSlideLabel || 'None';
+
+    selectedSlideState.textContent = selected;
+    configuredSlideState.textContent = configured;
+
+    selectedSlideState.className = 'state-value ' + (workflowState.slideLabel ? 'state-ok' : 'state-empty');
+    configuredSlideState.className = 'state-value ' + (!workflowState.configuredSlideLabel
+        ? 'state-empty'
+        : workflowState.configuredSlideMatches === false ? 'state-warn' : 'state-ok');
+
+    selectedSlideState.title = workflowState.slideLabel || 'No slide selected';
+    configuredSlideState.title = !workflowState.configuredSlideLabel
+        ? 'No configured slide loaded yet'
+        : workflowState.configuredSlideMatches === false
+            ? 'Configured slide does not match the selected slide'
+            : 'Configured slide matches the selected slide';
 }
 
 // ── Serial ─────────────────────────────────────────────────────────────────
@@ -252,6 +280,50 @@ function setConnected(val) {
     connStatus.className = 'badge ' + (val ? 'badge-on' : 'badge-off');
     btnConnect.textContent = val ? 'Disconnect' : 'Connect';
     updateButtonStates();
+}
+
+function setFirmwareStatus(info) {
+    if (!connected || !info) {
+        fwStatus.textContent = '';
+        fwStatus.className = 'dim';
+        return;
+    }
+
+    if (info.fwVersion) {
+        fwStatus.textContent = `FW ${info.fwVersion}`;
+        fwStatus.className = info.compatible ? 'dim fw-ok' : 'dim fw-bad';
+        fwStatus.title = info.versionText || `Firmware ${info.fwVersion}`;
+        return;
+    }
+
+    if (info.detected) {
+        fwStatus.textContent = 'FW detected';
+        fwStatus.className = 'dim fw-ok';
+        fwStatus.title = info.versionText || 'Controller responded, but no build date was reported.';
+        return;
+    }
+
+    fwStatus.textContent = 'FW unknown';
+    fwStatus.className = 'dim fw-bad';
+    fwStatus.title = info.error || info.versionText || 'Unable to detect firmware version';
+}
+
+function applyLibStatus(status, notify = false) {
+    currentLibPath = status?.ok ? status.path : '';
+    if (status?.ok) {
+        libPathDisplay.textContent = status.path;
+        libPathDisplay.title = status.path;
+        libPathDisplay.classList.remove('lib-invalid');
+    } else if (status?.error && status.error !== 'No library selected') {
+        libPathDisplay.textContent = status.error;
+        libPathDisplay.title = status.error;
+        libPathDisplay.classList.add('lib-invalid');
+        if (notify) alert(status.error);
+    } else {
+        libPathDisplay.textContent = 'No library selected';
+        libPathDisplay.title = 'Click 📂 Library to select your gcode library folder';
+        libPathDisplay.classList.remove('lib-invalid');
+    }
 }
 
 // ── Cut helpers ────────────────────────────────────────────────────────────
@@ -302,6 +374,12 @@ function bindUI() {
             const r = await window.gg.connect(port);
             if (r?.ok) {
                 setConnected(true);
+                setFirmwareStatus(r.firmware);
+                if (r.firmware && !r.firmware.compatible) {
+                    alert(r.firmware.fwVersion
+                        ? `Detected firmware ${r.firmware.fwVersion}. The reference library requires at least 20220800.`
+                        : 'Unable to detect firmware version. Operations will be blocked until the controller responds to $I.');
+                }
             } else {
                 alert('Connection failed: ' + (r?.error || 'Unknown error'));
             }
@@ -344,6 +422,11 @@ function bindUI() {
         const holeType = holeSelect.value;
         startRun(`Drilling & Tapping (${holeType})…`);
         window.gg.runHoles(holeType);
+    });
+
+    btnToolChange.addEventListener('click', () => {
+        startRun('Moving to tool change position…');
+        window.gg.toolChange();
     });
 
     btnContinue.addEventListener('click', () => {
@@ -411,6 +494,10 @@ function bindOverrides() {
     });
     $('btn-fro-reset').addEventListener('click', () => {
         window.gg.sendRealtime(RT.FEED_RESET);
+        currentFeedOverride = 100;
+        froVal.textContent = '100%';
+        froSlider.value = 100;
+        _setSliderPct(froSlider, 100);
     });
 
     // RPM slider
@@ -426,6 +513,10 @@ function bindOverrides() {
     });
     $('btn-sro-reset').addEventListener('click', () => {
         window.gg.sendRealtime(RT.SPINDLE_RESET);
+        currentSpindleOverride = 100;
+        sroVal.textContent = '100%';
+        sroSlider.value = 100;
+        _setSliderPct(sroSlider, 100);
     });
 
     btnFeedHold.addEventListener('click', () => window.gg.hold());
@@ -437,11 +528,11 @@ function bindOverrides() {
     btnBrowseLib.addEventListener('click', async () => {
         const result = await window.gg.browseLibPath();
         if (result.ok) {
-            currentLibPath = result.path;
-            libPathDisplay.textContent = result.path;
-            libPathDisplay.title = result.path;
+            applyLibStatus(await window.gg.getLibStatus());
             await populateSlides();
             updateButtonStates();
+        } else if (result.error) {
+            applyLibStatus({ ok: false, error: result.error }, true);
         }
     });
 }
@@ -459,7 +550,6 @@ function bindEvents() {
             currentSpindleOverride = s.overrides.spindle;
             froVal.textContent = s.overrides.feed + '%';
             sroVal.textContent = s.overrides.spindle + '%';
-            // Keep sliders in sync with actual machine state
             if (!froSlider.matches(':active')) {
                 froSlider.value = s.overrides.feed;
                 _setSliderPct(froSlider, s.overrides.feed);
@@ -468,15 +558,11 @@ function bindEvents() {
                 sroSlider.value = s.overrides.spindle;
                 _setSliderPct(sroSlider, s.overrides.spindle);
             }
-        } else {
-            // No Ov: field in status = all overrides are at default 100%
-            currentFeedOverride = 100;
-            currentSpindleOverride = 100;
-            froVal.textContent = '100%';
-            sroVal.textContent = '100%';
-            if (!froSlider.matches(':active')) { froSlider.value = 100; _setSliderPct(froSlider, 100); }
-            if (!sroSlider.matches(':active')) { sroSlider.value = 100; _setSliderPct(sroSlider, 100); }
         }
+    });
+
+    window.gg.on('machine:firmware', (info) => {
+        setFirmwareStatus(info);
     });
 
     window.gg.on('machine:line', (l) => appendLog(outputLog, l));
@@ -507,7 +593,9 @@ function bindEvents() {
                 'probed': 'Probe complete — click Configure to set work coordinates.',
                 'ready': 'Machine configured and ready to cut.',
             };
-            const msg = phaseMsg[result.phase] || 'Operation complete.';
+            const msg = result.action === 'tool-change'
+                ? 'Machine moved to the tool change position.'
+                : phaseMsg[result.phase] || 'Operation complete.';
             showDone(true, 'Done', msg);
             await refreshMem();
         }
@@ -517,6 +605,7 @@ function bindEvents() {
     window.gg.on('workflow:state', (state) => {
         workflowState = state;
         updatePhaseDots(state.phase);
+        updateSlideStateSummary();
         updateButtonStates();
         if (chkDevMode) chkDevMode.checked = !!state.devMode;
         btnFeedHold.classList.toggle('btn-rt-held', !!state.held);
@@ -538,6 +627,15 @@ function bindEvents() {
 
     window.gg.on('machine:disconnect', () => {
         setConnected(false);
+        setFirmwareStatus(null);
+        currentFeedOverride = 100;
+        currentSpindleOverride = 100;
+        froVal.textContent = '100%';
+        sroVal.textContent = '100%';
+        froSlider.value = 100;
+        sroSlider.value = 100;
+        _setSliderPct(froSlider, 100);
+        _setSliderPct(sroSlider, 100);
         appendLog(outputLog, '⚠ Machine disconnected', 'err');
     });
 
@@ -565,22 +663,17 @@ async function refreshMem() {
 
 async function init() {
     await refreshPorts();
+    const libStatus = await window.gg.getLibStatus();
+    applyLibStatus(libStatus, !!libStatus?.path && !libStatus?.ok);
     await populateSlides();
 
-    // Load and display library path
-    const lp = await window.gg.getLibPath();
-    currentLibPath = lp || '';
-    if (currentLibPath) {
-        libPathDisplay.textContent = currentLibPath;
-        libPathDisplay.title = currentLibPath;
-    } else {
-        libPathDisplay.textContent = 'No library selected';
-        libPathDisplay.title = 'Click 📂 Library to select your gcode library folder';
-    }
+    const firmware = await window.gg.getFirmwareInfo();
+    setFirmwareStatus(firmware);
 
     // Restore last state from main process
     workflowState = await window.gg.getState();
     updatePhaseDots(workflowState.phase);
+    updateSlideStateSummary();
     if (workflowState.slideKey) {
         await refreshFootprints(workflowState.slideKey);
         await refreshDepths(workflowState.slideKey);
