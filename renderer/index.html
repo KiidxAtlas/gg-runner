@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>GG Runner</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+    <div id="app">
+
+        <!-- ── Top bar ─────────────────────────────────────────────────── -->
+        <header id="header">
+            <span id="app-title">GG Runner</span>
+            <div id="conn-bar">
+                <select id="port-select">
+                    <option value="">Select port…</option>
+                </select>
+                <button id="btn-refresh" title="Refresh ports">↺</button>
+                <button id="btn-connect">Connect</button>
+                <span id="conn-status" class="badge badge-off">Disconnected</span>
+                <span id="machine-pos" class="dim"></span>
+                <label id="dev-mode-label" title="Simulate machine — no serial needed">
+                    <input type="checkbox" id="chk-dev-mode"> Dev
+                </label>
+                <div id="lib-path-row">
+                    <span id="lib-path-display" class="dim" title="Gcode library folder"></span>
+                    <button id="btn-browse-lib" title="Select gcode library folder">📂 Library</button>
+                </div>
+            </div>
+        </header>
+
+        <!-- ── Body ────────────────────────────────────────────────────── -->
+        <div id="body">
+
+            <!-- ── LEFT: Setup ─────────────────────────────────────────── -->
+            <aside id="setup-panel">
+                <section class="panel-section">
+                    <h3 class="section-title">Slide Type</h3>
+                    <div id="slide-radios"></div>
+                </section>
+
+                <section class="panel-section">
+                    <h3 class="section-title">Setup Sequence</h3>
+                    <div id="phase-steps">
+                        <div class="phase-row" id="phase-1">
+                            <div class="phase-num">1</div>
+                            <div class="phase-info">
+                                <div class="phase-label">Position Slide</div>
+                                <div class="phase-desc">Jog to clamp position</div>
+                            </div>
+                            <span class="phase-dot" id="dot-1"></span>
+                        </div>
+                        <div class="phase-row" id="phase-2">
+                            <div class="phase-num">2</div>
+                            <div class="phase-info">
+                                <div class="phase-label">Probe Slide</div>
+                                <div class="phase-desc">Find X/Y/Z references</div>
+                            </div>
+                            <span class="phase-dot" id="dot-2"></span>
+                        </div>
+                        <div class="phase-row" id="phase-3">
+                            <div class="phase-num">3</div>
+                            <div class="phase-info">
+                                <div class="phase-label">Configure WCS</div>
+                                <div class="phase-desc">Compute work coordinates</div>
+                            </div>
+                            <span class="phase-dot" id="dot-3"></span>
+                        </div>
+                    </div>
+
+                    <div id="phase-buttons">
+                        <button id="btn-position" class="btn-step" disabled>Position →</button>
+                        <button id="btn-probe" class="btn-step" disabled>Probe →</button>
+                        <button id="btn-configure" class="btn-step" disabled>Configure →</button>
+                    </div>
+                </section>
+
+                <div id="abort-row">
+                    <button id="btn-abort" class="btn-danger hidden">■ Abort</button>
+                </div>
+            </aside>
+
+            <!-- ── CENTER: Guidance / Log ───────────────────────────────── -->
+            <main id="center-panel">
+
+                <!-- Idle welcome -->
+                <div id="view-idle" class="center-view active">
+                    <div class="guidance-icon">⚙</div>
+                    <h2 class="guidance-heading">GG Runner</h2>
+                    <p class="guidance-body">Select a slide type on the left, then run the three-step setup sequence to
+                        position, probe, and configure work coordinates.<br><br>Once configured, use the cut panel on
+                        the right to mill footprints or drill/tap mounting holes.</p>
+                </div>
+
+                <!-- Running: gcode log view -->
+                <div id="view-running" class="center-view">
+                    <div id="run-header">
+                        <div id="run-step-row">
+                            <div id="run-step-text">Running…</div>
+                            <button id="btn-new-run" class="btn-sm hidden">↩ New</button>
+                        </div>
+                        <div id="run-progress-bar">
+                            <div id="run-progress-fill"></div>
+                        </div>
+                        <div id="run-step-count" class="dim"></div>
+                    </div>
+                    <div id="run-result-row" class="hidden">
+                        <span id="run-result-icon"></span>
+                        <span id="run-result-text"></span>
+                    </div>
+                    <div id="gcode-log"></div>
+                </div>
+
+                <!-- Instruction pause view -->
+                <div id="view-instruction" class="center-view">
+                    <div class="guidance-icon">⚠</div>
+                    <h2 class="guidance-heading" id="instr-title">Action Required</h2>
+                    <p class="guidance-body" id="instr-text"></p>
+                    <img id="instr-image" class="instr-img hidden" alt="Instruction image" />
+                    <div id="instr-buttons">
+                        <button id="btn-continue" class="btn-accent">Continue →</button>
+                        <button id="btn-instr-abort" class="btn-danger">■ Abort</button>
+                    </div>
+                </div>
+
+                <!-- Done / error view -->
+                <div id="view-done" class="center-view">
+                    <div class="guidance-icon" id="done-icon">✓</div>
+                    <h2 class="guidance-heading" id="done-title">Complete</h2>
+                    <p class="guidance-body" id="done-body"></p>
+                </div>
+
+            </main>
+
+            <!-- ── RIGHT: Cut Options + Machine Output ──────────────────── -->
+            <aside id="cut-panel">
+
+                <section class="panel-section" id="fp-section">
+                    <h3 class="section-title">Footprint</h3>
+                    <div class="form-row">
+                        <label>Optic</label>
+                        <select id="fp-select">
+                            <option value="">—</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label>Position</label>
+                        <select id="pos-select">
+                            <option value="Rear">Rear</option>
+                            <option value="Standard">Standard</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label>Depth</label>
+                        <select id="depth-select">
+                            <option value="">—</option>
+                        </select>
+                    </div>
+                    <button id="btn-run-fp" class="btn-accent full-width" disabled>Mill Footprint</button>
+                </section>
+
+                <section class="panel-section" id="hole-section">
+                    <h3 class="section-title">Mounting Holes</h3>
+                    <div class="form-row">
+                        <label>Thread</label>
+                        <select id="hole-select">
+                            <option value="4-40">4-40</option>
+                            <option value="M3">M3</option>
+                            <option value="6-32">6-32</option>
+                        </select>
+                    </div>
+                    <button id="btn-run-holes" class="btn-secondary full-width" disabled>Drill &amp; Tap</button>
+                </section>
+
+                <section class="panel-section" id="machine-ctrl-section">
+                    <h3 class="section-title">Machine Controls</h3>
+
+                    <!-- Feed rate override -->
+                    <div class="override-row override-slider-row">
+                        <span class="override-label">Feed</span>
+                        <input type="range" id="fro-slider" class="ovr-slider" min="10" max="200" step="1" value="100">
+                        <span class="override-val" id="fro-val">100%</span>
+                        <button class="btn-ovr-reset" id="btn-fro-reset" title="Reset to 100%">↺</button>
+                    </div>
+
+                    <!-- Rapid override -->
+                    <div class="override-row">
+                        <span class="override-label">Rapid</span>
+                        <button class="btn-ovr btn-rapid" data-cmd="0x97">25%</button>
+                        <button class="btn-ovr btn-rapid" data-cmd="0x96">50%</button>
+                        <button class="btn-ovr btn-rapid active-rapid" data-cmd="0x95">100%</button>
+                    </div>
+
+                    <!-- Spindle override -->
+                    <div class="override-row override-slider-row">
+                        <span class="override-label">RPM</span>
+                        <input type="range" id="sro-slider" class="ovr-slider" min="10" max="200" step="1" value="100">
+                        <span class="override-val" id="sro-val">100%</span>
+                        <button class="btn-ovr-reset" id="btn-sro-reset" title="Reset to 100%">↺</button>
+                    </div>
+
+                    <!-- Feed hold / Resume / Reset -->
+                    <div class="rt-buttons">
+                        <button id="btn-feed-hold" class="btn-rt" title="Feed Hold">⏸ Hold</button>
+                        <button id="btn-cycle-start" class="btn-rt btn-rt-go" title="Cycle Start / Resume">▶
+                            Resume</button>
+                        <button id="btn-soft-reset" class="btn-rt btn-rt-rst" title="Soft Reset">⟳ Reset</button>
+                    </div>
+                </section>
+
+                <section class="panel-section" id="output-section">
+                    <div class="panel-header">
+                        <span class="section-title">Machine Output</span>
+                        <button id="btn-clear" class="btn-sm">Clear</button>
+                    </div>
+                    <div id="output-log"></div>
+                    <div id="manual-row">
+                        <input id="manual-in" type="text" placeholder="Send gcode…" spellcheck="false" />
+                        <button id="btn-send-manual">Send</button>
+                    </div>
+                </section>
+
+                <details id="mem-wrap">
+                    <summary>Memory registers</summary>
+                    <pre id="mem-dump"></pre>
+                </details>
+
+            </aside>
+
+        </div><!-- /body -->
+    </div><!-- /app -->
+
+    <script type="module" src="./app.js"></script>
+</body>
+
+</html>

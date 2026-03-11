@@ -1,0 +1,598 @@
+'use strict';
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function appendLog(el, text, cls = '') {
+    if (el.children.length > 600) el.removeChild(el.firstChild);
+    const d = document.createElement('div');
+    d.className = 'log-line' + (cls ? ' ' + cls : '');
+    d.textContent = text;
+    el.appendChild(d);
+    el.scrollTop = el.scrollHeight;
+}
+
+// ── State ──────────────────────────────────────────────────────────────────
+
+let connected = false;
+let currentLibPath = '';
+let workflowState = { phase: 'idle', slideKey: null, running: false };
+let currentFeedOverride = 100;
+let currentSpindleOverride = 100;
+let footprintOpts = [];   // [{ key, label, positions }]
+let depthOpts = [];   // [{ key, label? }]
+let currentView = 'idle';
+
+// GRBL real-time override byte codes
+const RT = {
+    FEED_RESET: 0x90,
+    FEED_PLUS10: 0x91,
+    FEED_MINUS10: 0x92,
+    FEED_PLUS1: 0x93,
+    FEED_MINUS1: 0x94,
+    RAPID_100: 0x95,
+    RAPID_50: 0x96,
+    RAPID_25: 0x97,
+    SPINDLE_RESET: 0x99,
+    SPINDLE_PLUS10: 0x9A,
+    SPINDLE_MINUS10: 0x9B,
+    SPINDLE_PLUS1: 0x9C,
+    SPINDLE_MINUS1: 0x9D,
+    FEED_HOLD: '!',
+    CYCLE_START: '~',
+    SOFT_RESET: '\x18',
+};
+
+// ── DOM ────────────────────────────────────────────────────────────────────
+
+const portSelect = $('port-select');
+const btnRefresh = $('btn-refresh');
+const btnConnect = $('btn-connect');
+const connStatus = $('conn-status');
+const machinePos = $('machine-pos');
+const slideRadios = $('slide-radios');
+const btnPosition = $('btn-position');
+const btnProbe = $('btn-probe');
+const btnConfigure = $('btn-configure');
+const btnAbort = $('btn-abort');
+const gcodeLog = $('gcode-log');
+const runStepText = $('run-step-text');
+const runProgressFill = $('run-progress-fill');
+const runStepCount = $('run-step-count');
+const instrTitle = $('instr-title');
+const instrText = $('instr-text');
+const instrImage = $('instr-image');
+const btnContinue = $('btn-continue');
+const btnInstrAbort = $('btn-instr-abort');
+const doneIcon = $('done-icon');
+const doneTitle = $('done-title');
+const doneBody = $('done-body');
+const fpSelect = $('fp-select');
+const posSelect = $('pos-select');
+const depthSelect = $('depth-select');
+const btnRunFp = $('btn-run-fp');
+const holeSelect = $('hole-select');
+const btnRunHoles = $('btn-run-holes');
+const outputLog = $('output-log');
+const manualIn = $('manual-in');
+const btnSendManual = $('btn-send-manual');
+const btnClear = $('btn-clear');
+const memWrap = $('mem-wrap');
+const memDump = $('mem-dump');
+const fpSection = $('fp-section');
+const holeSection = $('hole-section');
+const froVal = $('fro-val');
+const sroVal = $('sro-val');
+const froSlider = $('fro-slider');
+const sroSlider = $('sro-slider');
+const btnFeedHold = $('btn-feed-hold');
+const btnCycleStart = $('btn-cycle-start');
+const btnSoftReset = $('btn-soft-reset');
+const chkDevMode = $('chk-dev-mode');
+const libPathDisplay = $('lib-path-display');
+const btnBrowseLib = $('btn-browse-lib');
+const runResultRow = $('run-result-row');
+const runResultIcon = $('run-result-icon');
+const runResultText = $('run-result-text');
+const btnNewRun = $('btn-new-run');
+
+// ── View switching ─────────────────────────────────────────────────────────
+
+function showView(name) {
+    currentView = name;
+    document.querySelectorAll('.center-view').forEach(el => {
+        el.classList.toggle('active', el.id === 'view-' + name);
+    });
+}
+
+// ── Phase dot + next-step highlight ──────────────────────────────────────
+
+const phaseOrder = ['idle', 'positioned', 'probed', 'ready'];
+
+function updatePhaseDots(phase) {
+    const idx = phaseOrder.indexOf(phase);
+    // dot-1 = positioned, dot-2 = probed, dot-3 = ready
+    [$('dot-1'), $('dot-2'), $('dot-3')].forEach((dot, i) => {
+        const reached = idx >= i + 1;
+        dot.className = 'phase-dot ' + (reached ? 'dot-done' : 'dot-pending');
+    });
+
+    // Highlight the recommended next step button
+    const nextMap = { idle: 'btn-position', positioned: 'btn-probe', probed: 'btn-configure', ready: null };
+    [btnPosition, btnProbe, btnConfigure].forEach(b => b.classList.remove('step-next'));
+    const nextId = nextMap[phase];
+    if (nextId) $(nextId)?.classList.add('step-next');
+}
+
+// ── Slide population ────────────────────────────────────────────────────────
+
+async function populateSlides() {
+    if (!currentLibPath) {
+        slideRadios.innerHTML = '<p class="dim note lib-prompt">Select a library folder first (📂 Library)</p>';
+        return;
+    }
+    const slides = await window.gg.getSlides();
+    slideRadios.innerHTML = '';
+    for (const s of slides) {
+        const label = document.createElement('label');
+        label.className = 'radio-row';
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'slide';
+        radio.value = s.key;
+        radio.addEventListener('change', () => onSlideChange(s.key));
+        label.appendChild(radio);
+        const span = document.createElement('span');
+        span.textContent = s.label;
+        if (s.maxDepth) {
+            const note = document.createElement('span');
+            note.className = 'dim note';
+            note.textContent = ` (max ${s.maxDepth})`;
+            span.appendChild(note);
+        }
+        label.appendChild(span);
+        slideRadios.appendChild(label);
+    }
+}
+
+async function onSlideChange(slideKey) {
+    await window.gg.setSlide(slideKey);
+    await refreshFootprints(slideKey);
+    await refreshDepths(slideKey);
+    updateButtonStates();
+}
+
+async function refreshFootprints(slideKey) {
+    footprintOpts = await window.gg.getFootprints(slideKey);
+    fpSelect.innerHTML = '<option value="">Select optic…</option>';
+    for (const fp of footprintOpts) {
+        const o = document.createElement('option');
+        o.value = fp.key;
+        o.textContent = fp.label;
+        fpSelect.appendChild(o);
+    }
+    onFpChange();
+}
+
+async function refreshDepths(slideKey) {
+    depthOpts = await window.gg.getDepths(slideKey);
+    depthSelect.innerHTML = '';
+    for (const d of depthOpts) {
+        const o = document.createElement('option');
+        o.value = d.key;
+        o.textContent = d.key;
+        depthSelect.appendChild(o);
+    }
+    // Default to middle depth
+    if (depthOpts.length) {
+        const mid = Math.floor(depthOpts.length / 2);
+        depthSelect.value = depthOpts[mid].key;
+    }
+}
+
+function onFpChange() {
+    const key = fpSelect.value;
+    const fp = footprintOpts.find(f => f.key === key);
+    posSelect.innerHTML = '';
+    if (fp) {
+        for (const p of fp.positions) {
+            const o = document.createElement('option');
+            o.value = p;
+            o.textContent = p;
+            posSelect.appendChild(o);
+        }
+    }
+    updateButtonStates();
+}
+
+// ── Button state management ────────────────────────────────────────────────
+
+function updateButtonStates() {
+    const { phase, slideKey, running, devMode } = workflowState;
+    const hasSlide = !!slideKey;
+    const active = connected || devMode;
+    const canSetup = active && hasSlide && !running && !!currentLibPath;
+    const isReady = phase === 'ready';
+    const canCut = active && isReady && !running;
+    // Configure requires probe to have been run at least once
+    const canConfigure = canSetup && (phase === 'probed' || phase === 'ready');
+
+    btnPosition.disabled = !canSetup;
+    btnProbe.disabled = !canSetup;
+    btnConfigure.disabled = !canConfigure;
+    btnAbort.classList.toggle('hidden', !running);
+
+    // Right cut panel
+    const locked = !canCut;
+    fpSection.classList.toggle('locked', locked);
+    holeSection.classList.toggle('locked', locked);
+    btnRunFp.disabled = locked || !fpSelect.value || !depthSelect.value;
+    btnRunHoles.disabled = locked;
+}
+
+// ── Serial ─────────────────────────────────────────────────────────────────
+
+async function refreshPorts() {
+    const ports = await window.gg.listPorts();
+    portSelect.innerHTML = '<option value="">Select port…</option>';
+    for (const p of ports) {
+        const o = document.createElement('option');
+        o.value = p.path;
+        o.textContent = p.path + (p.manufacturer ? ' – ' + p.manufacturer : '');
+        portSelect.appendChild(o);
+    }
+}
+
+function setConnected(val) {
+    connected = val;
+    connStatus.textContent = val ? 'Connected' : 'Disconnected';
+    connStatus.className = 'badge ' + (val ? 'badge-on' : 'badge-off');
+    btnConnect.textContent = val ? 'Disconnect' : 'Connect';
+    updateButtonStates();
+}
+
+// ── Cut helpers ────────────────────────────────────────────────────────────
+
+function startRun(label) {
+    showView('running');
+    gcodeLog.innerHTML = '';
+    runStepText.textContent = label;
+    runProgressFill.style.width = '0%';
+    runStepCount.textContent = '';
+    runResultRow.classList.add('hidden');
+    btnNewRun.classList.add('hidden');
+    appendLog(gcodeLog, '▶ ' + label, 'dim');
+}
+
+function showDone(ok, title, body) {
+    // Stay on view-running so the gcode log remains visible
+    runResultRow.className = ok ? 'run-result-ok' : 'run-result-err';
+    runResultIcon.textContent = ok ? '✓' : '✕';
+    runResultText.textContent = body || title;
+    if (ok) runProgressFill.style.width = '100%';
+    runStepText.textContent = title;
+    btnNewRun.classList.remove('hidden');
+}
+
+function resetRun() {
+    gcodeLog.innerHTML = '';
+    runResultRow.classList.add('hidden');
+    btnNewRun.classList.add('hidden');
+    runProgressFill.style.width = '0%';
+    runStepCount.textContent = '';
+    runStepText.textContent = 'Running…';
+    showView('idle');
+}
+
+// ── Event bindings ─────────────────────────────────────────────────────────
+
+function bindUI() {
+    btnRefresh.addEventListener('click', refreshPorts);
+
+    btnConnect.addEventListener('click', async () => {
+        if (connected) {
+            await window.gg.disconnect();
+            setConnected(false);
+        } else {
+            const port = portSelect.value;
+            if (!port) { alert('Select a port first.'); return; }
+            const r = await window.gg.connect(port);
+            if (r?.ok) {
+                setConnected(true);
+            } else {
+                alert('Connection failed: ' + (r?.error || 'Unknown error'));
+            }
+        }
+    });
+
+    btnPosition.addEventListener('click', () => {
+        startRun('Positioning slide…');
+        window.gg.position();
+    });
+
+    btnProbe.addEventListener('click', () => {
+        startRun('Probing slide…');
+        window.gg.probe();
+    });
+
+    btnConfigure.addEventListener('click', () => {
+        startRun('Configuring work coordinates…');
+        window.gg.configure();
+    });
+
+    btnAbort.addEventListener('click', () => {
+        window.gg.abort();
+    });
+
+    fpSelect.addEventListener('change', onFpChange);
+    depthSelect.addEventListener('change', updateButtonStates);
+
+    btnRunFp.addEventListener('click', () => {
+        const fp = fpSelect.value;
+        const pos = posSelect.value;
+        const depth = depthSelect.value;
+        if (!fp || !depth) return;
+        const fpLabel = footprintOpts.find(f => f.key === fp)?.label || fp;
+        startRun(`Milling ${fpLabel} – ${pos} at ${depth}…`);
+        window.gg.runFootprint(fp, pos, depth);
+    });
+
+    btnRunHoles.addEventListener('click', () => {
+        const holeType = holeSelect.value;
+        startRun(`Drilling & Tapping (${holeType})…`);
+        window.gg.runHoles(holeType);
+    });
+
+    btnContinue.addEventListener('click', () => {
+        showView('running');
+        window.gg.continueStep();
+    });
+
+    btnInstrAbort.addEventListener('click', () => {
+        window.gg.abort();
+        showView('running');
+    });
+
+    btnSendManual.addEventListener('click', sendManual);
+    manualIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendManual(); });
+    btnClear.addEventListener('click', () => { outputLog.innerHTML = ''; });
+
+    btnNewRun.addEventListener('click', resetRun);
+
+    memWrap.addEventListener('toggle', refreshMem);
+
+    bindOverrides();
+}
+
+function sendManual() {
+    const line = manualIn.value.trim();
+    if (!line) return;
+    window.gg.sendLine(line);
+    appendLog(outputLog, '> ' + line, 'sent');
+    manualIn.value = '';
+}
+
+function _setSliderPct(slider, value) {
+    const pct = ((value - 10) / (200 - 10)) * 100;
+    slider.style.setProperty('--pct', pct.toFixed(1));
+}
+
+function _sendIncrements(current, target, plus10, minus10, plus1, minus1) {
+    let v = current;
+    while (v < target - 9) { window.gg.sendRealtime(plus10); v += 10; }
+    while (v > target + 9) { window.gg.sendRealtime(minus10); v -= 10; }
+    while (v < target) { window.gg.sendRealtime(plus1); v += 1; }
+    while (v > target) { window.gg.sendRealtime(minus1); v -= 1; }
+}
+
+function bindOverrides() {
+    // Rapid preset buttons
+    document.querySelectorAll('.btn-rapid').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.btn-rapid').forEach(b => b.classList.remove('active-rapid'));
+            btn.classList.add('active-rapid');
+            window.gg.sendRealtime(parseInt(btn.dataset.cmd, 16));
+        });
+    });
+
+    // Feed slider
+    froSlider.addEventListener('input', () => {
+        froVal.textContent = froSlider.value + '%';
+        _setSliderPct(froSlider, parseInt(froSlider.value));
+    });
+    froSlider.addEventListener('change', () => {
+        const target = parseInt(froSlider.value);
+        _sendIncrements(currentFeedOverride, target,
+            RT.FEED_PLUS10, RT.FEED_MINUS10, RT.FEED_PLUS1, RT.FEED_MINUS1);
+        currentFeedOverride = target;
+    });
+    $('btn-fro-reset').addEventListener('click', () => {
+        window.gg.sendRealtime(RT.FEED_RESET);
+    });
+
+    // RPM slider
+    sroSlider.addEventListener('input', () => {
+        sroVal.textContent = sroSlider.value + '%';
+        _setSliderPct(sroSlider, parseInt(sroSlider.value));
+    });
+    sroSlider.addEventListener('change', () => {
+        const target = parseInt(sroSlider.value);
+        _sendIncrements(currentSpindleOverride, target,
+            RT.SPINDLE_PLUS10, RT.SPINDLE_MINUS10, RT.SPINDLE_PLUS1, RT.SPINDLE_MINUS1);
+        currentSpindleOverride = target;
+    });
+    $('btn-sro-reset').addEventListener('click', () => {
+        window.gg.sendRealtime(RT.SPINDLE_RESET);
+    });
+
+    btnFeedHold.addEventListener('click', () => window.gg.hold());
+    btnCycleStart.addEventListener('click', () => window.gg.resume());
+    btnSoftReset.addEventListener('click', () => window.gg.abort());
+    chkDevMode.addEventListener('change', () => {
+        window.gg.setDevMode(chkDevMode.checked);
+    });
+    btnBrowseLib.addEventListener('click', async () => {
+        const result = await window.gg.browseLibPath();
+        if (result.ok) {
+            currentLibPath = result.path;
+            libPathDisplay.textContent = result.path;
+            libPathDisplay.title = result.path;
+            await populateSlides();
+            updateButtonStates();
+        }
+    });
+}
+
+// ── Machine / workflow events ──────────────────────────────────────────────
+
+function bindEvents() {
+    window.gg.on('machine:status', (s) => {
+        const pos = s.pos
+            ? `  X:${s.pos.x.toFixed(3)} Y:${s.pos.y.toFixed(3)} Z:${s.pos.z.toFixed(3)}`
+            : '';
+        machinePos.textContent = s.state + pos;
+        if (s.overrides) {
+            currentFeedOverride = s.overrides.feed;
+            currentSpindleOverride = s.overrides.spindle;
+            froVal.textContent = s.overrides.feed + '%';
+            sroVal.textContent = s.overrides.spindle + '%';
+            // Keep sliders in sync with actual machine state
+            if (!froSlider.matches(':active')) {
+                froSlider.value = s.overrides.feed;
+                _setSliderPct(froSlider, s.overrides.feed);
+            }
+            if (!sroSlider.matches(':active')) {
+                sroSlider.value = s.overrides.spindle;
+                _setSliderPct(sroSlider, s.overrides.spindle);
+            }
+        } else {
+            // No Ov: field in status = all overrides are at default 100%
+            currentFeedOverride = 100;
+            currentSpindleOverride = 100;
+            froVal.textContent = '100%';
+            sroVal.textContent = '100%';
+            if (!froSlider.matches(':active')) { froSlider.value = 100; _setSliderPct(froSlider, 100); }
+            if (!sroSlider.matches(':active')) { sroSlider.value = 100; _setSliderPct(sroSlider, 100); }
+        }
+    });
+
+    window.gg.on('machine:line', (l) => appendLog(outputLog, l));
+
+    window.gg.on('machine:alarm', (a) => {
+        appendLog(outputLog, 'ALARM: ' + a, 'err');
+        appendLog(gcodeLog, 'ALARM: ' + a, 'err');
+    });
+
+    window.gg.on('gcode:line', (l) => {
+        const cls = l.startsWith('⚠') ? 'err' : l.startsWith('→') ? 'dim' : l.startsWith('✓') ? 'ok' : '';
+        appendLog(gcodeLog, l, cls);
+        // Mirror to output log so it's always visible on the right panel
+        appendLog(outputLog, l, 'dim');
+    });
+
+    window.gg.on('gcode:done', async (result) => {
+        if (result.error === 'Aborted') {
+            appendLog(gcodeLog, '● Aborted', 'err');
+            showDone(false, 'Aborted', 'Run stopped by user.');
+        } else if (result.error) {
+            appendLog(gcodeLog, '⚠ ' + result.error, 'err');
+            showDone(false, 'Error', result.error);
+        } else if (result.ok) {
+            appendLog(gcodeLog, '✓ Complete', 'ok');
+            const phaseMsg = {
+                'positioned': 'Slide positioned — clamp the slide, then Probe.',
+                'probed': 'Probe complete — click Configure to set work coordinates.',
+                'ready': 'Machine configured and ready to cut.',
+            };
+            const msg = phaseMsg[result.phase] || 'Operation complete.';
+            showDone(true, 'Done', msg);
+            await refreshMem();
+        }
+        // workflowState.running is reset via workflow:state event
+    });
+
+    window.gg.on('workflow:state', (state) => {
+        workflowState = state;
+        updatePhaseDots(state.phase);
+        updateButtonStates();
+        if (chkDevMode) chkDevMode.checked = !!state.devMode;
+        btnFeedHold.classList.toggle('btn-rt-held', !!state.held);
+        btnCycleStart.classList.toggle('btn-rt-active', !!state.held);
+        // Restore the radio selection if slide changed
+        if (state.slideKey) {
+            const radio = slideRadios.querySelector(`input[value="${CSS.escape(state.slideKey)}"]`);
+            if (radio) radio.checked = true;
+        }
+    });
+
+    window.gg.on('workflow:step', (step) => {
+        runStepText.textContent = step.text;
+        if (step.total > 1) {
+            runProgressFill.style.width = Math.round((step.index / step.total) * 100) + '%';
+            runStepCount.textContent = `Step ${step.index} of ${step.total}`;
+        }
+    });
+
+    window.gg.on('machine:disconnect', () => {
+        setConnected(false);
+        appendLog(outputLog, '⚠ Machine disconnected', 'err');
+    });
+
+    window.gg.on('workflow:instruction', (step) => {
+        instrTitle.textContent = 'Action Required';
+        instrText.textContent = step.text;
+        if (step.image) {
+            instrImage.src = 'file://' + step.image;
+            instrImage.classList.remove('hidden');
+            instrImage.onerror = () => instrImage.classList.add('hidden');
+        } else {
+            instrImage.classList.add('hidden');
+        }
+        showView('instruction');
+    });
+}
+
+async function refreshMem() {
+    if (!memWrap.open) return;
+    const data = await window.gg.dumpMemory();
+    memDump.textContent = JSON.stringify(data, null, 2);
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+
+async function init() {
+    await refreshPorts();
+    await populateSlides();
+
+    // Load and display library path
+    const lp = await window.gg.getLibPath();
+    currentLibPath = lp || '';
+    if (currentLibPath) {
+        libPathDisplay.textContent = currentLibPath;
+        libPathDisplay.title = currentLibPath;
+    } else {
+        libPathDisplay.textContent = 'No library selected';
+        libPathDisplay.title = 'Click 📂 Library to select your gcode library folder';
+    }
+
+    // Restore last state from main process
+    workflowState = await window.gg.getState();
+    updatePhaseDots(workflowState.phase);
+    if (workflowState.slideKey) {
+        await refreshFootprints(workflowState.slideKey);
+        await refreshDepths(workflowState.slideKey);
+        const radio = slideRadios.querySelector(
+            `input[value="${CSS.escape(workflowState.slideKey)}"]`
+        );
+        if (radio) radio.checked = true;
+    }
+
+    updateButtonStates();
+    bindUI();
+    bindEvents();
+}
+
+init();

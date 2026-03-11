@@ -1,0 +1,22 @@
+{
+    "name": "gg-runner",
+    "version": "0.1.0",
+    "description": "Ghost Gunner machine controller - DDcut replacement",
+    "main": "main.js",
+    "scripts": {
+        "dev": "concurrently -k -n VITE,ELECTRON \"vite\" \"wait-on http://localhost:5173 && VITE_DEV=true electron .\"",
+        "build": "vite build",
+        "start": "npm run build && electron ."
+    },
+    "dependencies": {
+        "@serialport/parser-readline": "^12.0.0",
+        "js-yaml": "^4.1.0",
+        "serialport": "^12.0.0"
+    },
+    "devDependencies": {
+        "concurrently": "^9.2.1",
+        "electron": "^30.0.0",
+        "vite": "^7.3.1",
+        "wait-on": "^9.0.4"
+    }
+}
