@@ -5,8 +5,41 @@ const { SerialPort } = require('serialport');
 const { ReadlineParser } = require('@serialport/parser-readline');
 
 const GRBL_ERROR_MESSAGES = {
+    1: 'Expected command letter: G-code words consist of a letter and a value.',
+    2: 'Bad number format: Missing the expected G-code word value or numeric value format is not valid.',
+    3: 'Invalid $ statement: Grbl $ system command was not recognized or supported.',
+    4: 'Negative value: Received a negative value for an expected positive value.',
+    5: 'Homing not enabled: Homing cycle failure. Homing is not enabled via settings.',
+    6: 'Min step pulse: Step pulse time must be greater than 3usec.',
+    7: 'EEPROM read fail: Auto-restoring affected EEPROM to default values.',
     8: 'Not idle: Grbl $ command cannot be used unless the machine is idle.',
-    9: 'G-code lock: G-code commands are locked out during alarm or jog state.',
+    9: 'G-code lock: Commands are locked out during alarm or jog state.',
+    10: 'Soft limits require homing: Soft limits cannot be enabled without homing also enabled.',
+    11: 'Line overflow: Max characters per line exceeded.',
+    12: 'Step rate exceeded: Setting value causes the step rate to exceed the maximum supported.',
+    14: 'Build info exceeded: Build info or startup line exceeded EEPROM line length limit.',
+    15: 'Jog travel exceeded: Jog target exceeds machine travel.',
+    16: 'Invalid jog command: Jog command has no = or contains prohibited G-code.',
+    17: 'Laser mode requires PWM output.',
+    20: 'Unsupported command: Unsupported or invalid G-code command found in block.',
+    21: 'Modal group violation: More than one G-code command from same modal group found in block.',
+    22: 'Undefined feed rate: Feed rate has not yet been set or is undefined.',
+    23: 'Integer required: G-code command in block requires an integer value.',
+    24: 'Multiple axis commands: More than one G-code command requiring axis words found in block.',
+    25: 'Repeated word: Repeated G-code word found in block.',
+    26: 'No axis words: No axis words found in block for G-code command that requires them.',
+    27: 'Invalid line number.',
+    28: 'Missing value word: G-code command is missing a required value word.',
+    29: 'G59.x not supported: G59.x work coordinate systems are not supported.',
+    30: 'G53 invalid: G53 only allowed with G0 and G1 motion modes.',
+    31: 'Axis words not used: Axis words found when no command or current modal state uses them.',
+    32: 'Arc requires in-plane axis: G2 and G3 arcs require at least one in-plane axis word.',
+    33: 'Invalid motion target.',
+    34: 'Invalid arc radius.',
+    35: 'Arc requires offset: G2 and G3 arcs require at least one in-plane offset word.',
+    36: 'Unused value words found in block.',
+    37: 'G43.1 not assigned: Dynamic tool length offset is not assigned to configured tool length axis.',
+    38: 'Tool number exceeded: Tool number greater than max supported value (255).',
 };
 
 class SerialManager extends EventEmitter {
@@ -183,11 +216,22 @@ class SerialManager extends EventEmitter {
 
         // Info responses (from $#, $G, etc.)
         if (line.startsWith('[')) {
+            // GG3 sends [MSG:Pgm End] on M2/M30 — firmware resets overrides to 100%
+            if (line === '[MSG:Pgm End]') {
+                this._lastOverrides = { feed: 100, rapid: 100, spindle: 100 };
+                this._lastStatus = { ...this._lastStatus, overrides: this._lastOverrides };
+                this.emit('status', this._lastStatus);
+            }
+            // GG3 sends [MSG:Limit XYZ] before ALARM:1 for hard limits
+            if (line.startsWith('[MSG:Limit')) {
+                this.emit('alarm', line);
+            }
             this.emit('info', line);
             return;
         }
 
-        if (line === 'ok' || line.startsWith('ok')) {
+        // GG3 M105 RPM feedback mode: 'ok' is replaced by '0k'/'1k'/'2k'/'3k'
+        if (line === 'ok' || line === '0k' || line === '1k' || line === '2k' || line === '3k') {
             const pending = this._queue.shift();
             if (pending) pending.resolve(line);
             return;
@@ -199,7 +243,7 @@ class SerialManager extends EventEmitter {
             return;
         }
 
-        if (line.startsWith('ALARM:') || line.startsWith('[MSG:LIM')) {
+        if (line.startsWith('ALARM:')) {
             this.emit('alarm', line);
             this._drainQueue(new Error(line));
         }
