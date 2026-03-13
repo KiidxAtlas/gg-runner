@@ -147,7 +147,7 @@ math expression.
 | `floor(X)` | Round down to integer |
 | `abs(X)` | Absolute value |
 | `sqrt(X)` | Square root |
-| `if(COND, A, B)` | Production-library conditional — returns `B` when COND is non-zero, else `A` |
+| `if(COND, A, B)` | DDcut conditional — returns **`B`** (3rd arg) when COND is non-zero, else **`A`** (2nd arg). This is the **opposite** of a standard ternary. |
 | `or` `and` | Logical operators (use inside `if` conditions) |
 | `==` `!=` `>` `<` `>=` `<=` | Comparison operators (result is 1 or 0) |
 
@@ -189,13 +189,12 @@ This is not mathematically intuitive, but it matches the active `Footprint_Confi
 
 #### Standalone manifest sanity-check jobs
 
-The external library also ships standalone jobs under `Code/Sanity_Checks/`. The footprint-specific files in that folder are internally inconsistent with the active workflow files in three specific ways:
+The external library also ships standalone jobs under `Code/Sanity_Checks/`. The footprint-specific files in that folder are internally inconsistent with the active workflow files in two specific ways:
 
-- their initial `cut_configured` guard checks `G58X == 1` where the file logic requires `G58X == 0`
-- their secondary allowed-footprint check compares some footprint codes against `G58Z` instead of `G58X`
-- their final footprint-mismatch `M106` still uses `== 1` instead of the active `== 0` convention
+- their allowed-footprint checks compare some footprint-type codes against `G58Z` instead of `G58X` (G58Z holds `sanity_checks_disabled` at that point, not `footprint_type`)
+- all their `M106` halt lines use `== 1` instead of the active `== 0` convention
 
-GG Runner normalizes those known quirks when it loads the footprint-specific standalone sanity files so the manifest jobs behave consistently with the active workflow files.
+GG Runner normalizes both quirks when it loads the footprint-specific standalone sanity files so the manifest jobs behave consistently with the active workflow files.
 
 **Example — block a footprint on a wrong slide:**
 ```gcode

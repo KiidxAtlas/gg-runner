@@ -135,8 +135,8 @@ class Interpreter {
             mem.getRegister(match.toUpperCase())
         );
 
-        // DDcut if(COND, A, B) follows standard convention:
-        // evaluates to A when COND is true, otherwise B.
+        // DDcut if(COND, A, B) uses an inverted convention:
+        // evaluates to B when COND is true, otherwise A.
         js = this._transformIf(js);
 
         // Logic keywords
@@ -185,7 +185,8 @@ class Interpreter {
                     const cond = this._transformIf(args[0]);
                     const trueBranch = this._transformIf(args[1]);
                     const falseBranch = this._transformIf(args[2]);
-                    result += `(${cond} ? ${trueBranch} : ${falseBranch})`;
+                    // DDcut if(cond, a, b) -> (cond ? b : a)  (returns B when true)
+                    result += `(${cond} ? ${falseBranch} : ${trueBranch})`;
                 } else {
                     // Malformed – pass through unchanged
                     result += expr.slice(i, j + 1);

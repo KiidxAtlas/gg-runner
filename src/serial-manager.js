@@ -110,10 +110,12 @@ class SerialManager extends EventEmitter {
         });
     }
 
-    // Send a single real-time override byte (no newline)
+    // Send a single real-time override byte (no newline).
+    // _applyRealtimeOverride always runs so the UI reflects the change
+    // even in dev mode (where there is no live port).
     sendRaw(byteOrChar) {
+        this._applyRealtimeOverride(byteOrChar);
         if (this.port?.isOpen) {
-            this._applyRealtimeOverride(byteOrChar);
             this.port.write(typeof byteOrChar === 'number'
                 ? Buffer.from([byteOrChar])
                 : byteOrChar);

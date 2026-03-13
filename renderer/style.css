@@ -169,9 +169,28 @@ body {
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
+    overflow: hidden;
+    }
+    
+    /* Slide list + state: scrolls if the library has many slides */
+    #setup-scroll {
+        flex: 1;
+        min-height: 0;
     overflow-y: auto;
-    padding: 12px;
+    display: flex;
+        flex-direction: column;
     gap: 16px;
+    padding: 12px 12px 8px;
+    }
+    
+    /* Setup sequence + buttons + abort: always visible at bottom */
+    #setup-fixed {
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        padding: 8px 12px 12px;
+        border-top: 1px solid var(--border);
 }
 
 .panel-section {
@@ -354,7 +373,6 @@ body {
 }
 
 #abort-row {
-    margin-top: auto;
 }
 
 .btn-danger {
@@ -378,6 +396,37 @@ body {
     display: none !important;
 }
 
+.clamp-btn-row {
+    display: flex;
+    gap: 6px;
+}
+
+.clamp-btn-row .btn-secondary {
+    flex: 1;
+}
+
+.fp-file-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--muted);
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 140px;
+}
+
+.fp-file-btn[data-path]:not([disabled]):hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+.fp-file-btn:disabled {
+    cursor: default;
+}
 /* Center panel */
 #center-panel {
     flex: 1;
@@ -481,6 +530,30 @@ body {
     color: var(--muted);
 }
 
+#run-file-row {
+    margin-top: 5px;
+}
+
+.run-file-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-family: 'SF Mono', 'Menlo', 'Courier New', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+    text-align: left;
+}
+
+.run-file-btn[data-path]:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
 #gcode-log {
     flex: 1;
     overflow-y: auto;

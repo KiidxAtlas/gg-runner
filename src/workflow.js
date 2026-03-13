@@ -101,7 +101,7 @@ const SLIDE_TYPES = {
         configure: 'Code/Slide_Configs/1911_configure.gcode',
         installNote: SLIDE_INSTALL_NOTES['1911'],
         footprints: ['RMS', 'RMRcc', 'MOS'],
-        rearOnly: ['RMS', 'RMRcc', 'MOS'],
+        rearOnly: ['RMS', 'RMRcc'],
         is1911: true,
     },
     'P320': {
@@ -142,7 +142,7 @@ const FOOTPRINTS = {
     'Docter': { label: 'Docter / Vortex Venom', configs: { Rear: 'Code/Footprint_Configs/docter_rear_config.gcode', Standard: 'Code/Footprint_Configs/docter_standard_config.gcode' }, mill: 'Code/Footprint_Milling/docter_5-32.gcode' },
     'MOS': {
         label: 'MOS / Holosun SCS', configs: { Rear: 'Code/Footprint_Configs/mos_rear_config.gcode' }, mill: 'Code/Footprint_Milling/mos_5-32.gcode',
-        configs1911: { Rear: 'Code/Footprint_Configs/mos_1911_rear_config.gcode', Standard: 'Code/Footprint_Configs/mos_1911_standard_config.gcode' }, mill1911: 'Code/Footprint_Milling/1911_mos_platform_5-32.gcode'
+        configs1911: { Rear: 'Code/Footprint_Configs/mos_1911_rear_config.gcode' },
     },
     'RMS': { label: 'RMS·RMSc / Sig Romeo Zero', configs: { Rear: 'Code/Footprint_Configs/rms_rear_config.gcode', Standard: 'Code/Footprint_Configs/rms_standard_config.gcode' }, mill: 'Code/Footprint_Milling/rms_5-32.gcode' },
     'RMRcc': { label: 'RMRcc (Trijicon)', configs: { Rear: 'Code/Footprint_Configs/rmrcc_rear_config.gcode', Standard: 'Code/Footprint_Configs/rmrcc_standard_config.gcode' }, mill: 'Code/Footprint_Milling/RMRcc Rough and finish.gcode' },
@@ -208,6 +208,7 @@ class WorkflowEngine extends EventEmitter {
         this.phase = 'idle';
         this.running = false;
         this.devMode = false;
+        this._sanityChecksDisabled = false;
         this._aborted = false;
         this._held = false;
         this._holdPromise = null;
@@ -231,11 +232,11 @@ class WorkflowEngine extends EventEmitter {
         const is1911 = !!slide.is1911;
         return slide.footprints.map(k => {
             const fp = FOOTPRINTS[k];
-            const rearOnly = slide.rearOnly.includes(k);
+            const configs = (is1911 && fp.configs1911) ? fp.configs1911 : fp.configs;
             return {
                 key: k,
                 label: fp.label,
-                positions: rearOnly ? ['Rear'] : ['Rear', 'Standard'],
+                positions: Object.keys(configs),
                 millFile: (is1911 && fp.mill1911) ? fp.mill1911 : fp.mill,
             };
         });
@@ -262,6 +263,7 @@ class WorkflowEngine extends EventEmitter {
             configuredSlideMatches: configuredSlideKey ? configuredSlideKey === this.slideKey : null,
             running: this.running,
             devMode: this.devMode,
+            sanityChecksDisabled: this._sanityChecksDisabled,
             held: this._held,
         };
     }
@@ -270,6 +272,12 @@ class WorkflowEngine extends EventEmitter {
 
     setDevMode(val) {
         this.devMode = !!val;
+        this._emitState();
+    }
+
+    setSanityChecksDisabled(val) {
+        this._sanityChecksDisabled = !!val;
+        this.memory.setNamed('sanity_checks_disabled', this._sanityChecksDisabled ? 1 : 0);
         this._emitState();
     }
 
@@ -282,6 +290,9 @@ class WorkflowEngine extends EventEmitter {
         this.slideKey = slideKey;
         this.phase = 'idle';
         this.memory.reset();
+        if (this._sanityChecksDisabled) {
+            this.memory.setNamed('sanity_checks_disabled', 1);
+        }
         this._emitState();
     }
 
@@ -312,6 +323,17 @@ class WorkflowEngine extends EventEmitter {
         }
     }
 
+    async runHome() {
+        const ready = await this._preflightCheck({ allowAlarm: true });
+        if (!ready) return;
+
+        this.emit('step', { index: 1, total: 1, text: 'Homing machine…' });
+        const result = await this._runFile('Code/home.gcode', 'Homing machine…');
+        if (result?.error || this._aborted) return;
+
+        this.emit('gcode:done', { ok: true, action: 'home' });
+    }
+
     async runToolChange() {
         const ready = await this._preflightCheck({ allowAlarm: true });
         if (!ready) return;
@@ -321,6 +343,28 @@ class WorkflowEngine extends EventEmitter {
         if (result?.error || this._aborted) return;
 
         this.emit('gcode:done', { ok: true, action: 'tool-change' });
+    }
+
+    async runLeftClamp() {
+        const ready = await this._preflightCheck({ allowAlarm: true });
+        if (!ready) return;
+
+        this.emit('step', { index: 1, total: 1, text: 'Moving to left clamp position…' });
+        const result = await this._runFile('Code/Slide 1 Left clamp postiion.gcode', 'Moving to left clamp position…');
+        if (result?.error || this._aborted) return;
+
+        this.emit('gcode:done', { ok: true, action: 'left-clamp' });
+    }
+
+    async runRightClamp() {
+        const ready = await this._preflightCheck({ allowAlarm: true });
+        if (!ready) return;
+
+        this.emit('step', { index: 1, total: 1, text: 'Moving to right clamp position…' });
+        const result = await this._runFile('Code/Slide 3 Right clamp position.gcode', 'Moving to right clamp position…');
+        if (result?.error || this._aborted) return;
+
+        this.emit('gcode:done', { ok: true, action: 'right-clamp' });
     }
 
     async runProbe() {
@@ -608,10 +652,13 @@ class WorkflowEngine extends EventEmitter {
         const state = String(status.state || 'Unknown').split(':')[0];
         if (state === 'Alarm') {
             if (allowAlarm) {
-                // Unlock the alarm so subsequent G-code can run.
-                // $H in the file will home if enabled; if homing is disabled,
-                // $X is the only way to clear the lock.
-                try { await this.serial.send('$X'); } catch (_) { /* best-effort */ }
+                // $X does NOT return 'ok' — GRBL responds with
+                // [MSG:Caution: Unlocked], a bracket line that never resolves
+                // the ack queue.  Write directly to bypass the queue.
+                if (this.serial.port?.isOpen) {
+                    this.serial.port.write('$X\n');
+                    await new Promise(r => setTimeout(r, 200));
+                }
                 return true;
             }
             this.emit('gcode:done', { error: 'Machine is in Alarm. Clear the alarm before starting.' });
@@ -656,6 +703,9 @@ class WorkflowEngine extends EventEmitter {
     async _runFile(relPath, _label) {
         if (this._aborted) return { error: 'Aborted' };
 
+        // Keep the named variable in sync with the engine flag before every file
+        this.memory.setNamed('sanity_checks_disabled', this._sanityChecksDisabled ? 1 : 0);
+
         const full = path.join(this.libPath, relPath);
         if (!fs.existsSync(full)) {
             const err = `File not found: ${relPath}`;
@@ -665,6 +715,7 @@ class WorkflowEngine extends EventEmitter {
 
         const lines = fs.readFileSync(full, 'utf8').replace(/\r\n/g, '\n').split('\n');
         this.emit('gcode:line', `File: ${relPath}`);
+        this.emit('gcode:file', { relPath, fullPath: full });
 
         return this._runLines(lines.map(sourceLine => normalizeLibraryGcodeLine(relPath, sourceLine)), _label);
     }
@@ -695,6 +746,7 @@ class WorkflowEngine extends EventEmitter {
             .map(sourceLine => normalizeLibraryGcodeLine(relPath, sourceLine));
 
         this.emit('gcode:line', `File: ${relPath}`);
+        this.emit('gcode:file', { relPath, fullPath: full });
         if (usePreamble) {
             this.emit('gcode:line', `↷ Preserving setup lines 1-${preambleEndLine}, then resuming at line ${startLine}`);
         } else {
@@ -719,8 +771,11 @@ class WorkflowEngine extends EventEmitter {
             if (!stripped) continue;
             if (DDCUT_MCODE.test(stripped)) continue;
 
-            // Stop once the file starts commanding motion with coordinates.
-            if (/[XYZIJK]/i.test(stripped)) return i;
+            // Stop once the file issues a cutter motion command — a G0/G1/G2/G3
+            // word that also carries a coordinate.  Pure modal lines like
+            // "G0 G90 G94 G17" or WCS-select lines like "G54" are fine to keep
+            // in the preamble because they carry no coordinates.
+            if (/\bG[0-3]\b/i.test(stripped) && /[XYZIJK]/i.test(stripped)) return i;
         }
         return 0;
     }
@@ -740,6 +795,18 @@ class WorkflowEngine extends EventEmitter {
             if (!stripped) continue;
 
             if (DDCUT_MCODE.test(stripped)) {
+                // M100 computes a midpoint from WCS registers (e.g. G56X, G57X).
+                // Those registers are populated by G10 L20 commands sent to the
+                // machine earlier in the same file, but app-side memory is never
+                // updated during a run — only after a file completes.  Query $#
+                // right now so the interpreter reads actual machine values.
+                if (/^M100\b/i.test(stripped) && !this.devMode) {
+                    try {
+                        await this.serial.waitForIdle();
+                        const hashLines = await this.serial.queryHash();
+                        this.memory.syncFromHashResponse(hashLines);
+                    } catch (_) { /* non-fatal — interpreter will use last-known values */ }
+                }
                 const result = this.interpreter.process(stripped);
                 if (result.error) {
                     const err = result.error;

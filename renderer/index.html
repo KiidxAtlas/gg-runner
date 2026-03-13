@@ -25,6 +25,9 @@
                 <label id="dev-mode-label" title="Simulate machine — no serial needed">
                     <input type="checkbox" id="chk-dev-mode"> Dev
                 </label>
+                <label id="sanity-disable-label" title="Disable slide/footprint sanity checks">
+                    <input type="checkbox" id="chk-sanity-disable"> Disable Sanity
+                </label>
                 <div id="lib-path-row">
                     <span id="lib-path-display" class="dim" title="Gcode library folder"></span>
                     <button id="btn-browse-lib" title="Select gcode library folder">📂 Library</button>
@@ -37,6 +40,8 @@
 
             <!-- ── LEFT: Setup ─────────────────────────────────────────── -->
             <aside id="setup-panel">
+                <!-- Scrollable zone: slide list + state summary -->
+                <div id="setup-scroll">
                 <section class="panel-section">
                     <h3 class="section-title">Slide Type</h3>
                     <div id="slide-radios"></div>
@@ -53,7 +58,10 @@
                         <span id="configured-slide-state" class="state-value state-empty">None</span>
                     </div>
                 </section>
+                </div>
 
+                <!-- Fixed zone: always visible regardless of scroll -->
+                <div id="setup-fixed">
                 <section class="panel-section">
                     <h3 class="section-title">Setup Sequence</h3>
                     <div id="phase-steps">
@@ -93,6 +101,7 @@
                 <div id="abort-row">
                     <button id="btn-abort" class="btn-danger hidden">■ Abort</button>
                 </div>
+                </div><!-- /setup-fixed -->
             </aside>
 
             <!-- ── CENTER: Guidance / Log ───────────────────────────────── -->
@@ -118,6 +127,9 @@
                             <div id="run-progress-fill"></div>
                         </div>
                         <div id="run-step-count" class="dim"></div>
+                        <div id="run-file-row">
+                            <button id="run-file-btn" class="run-file-btn" title="Open file">—</button>
+                        </div>
                     </div>
                     <div id="run-result-row" class="hidden">
                         <span id="run-result-icon"></span>
@@ -173,7 +185,7 @@
                     </div>
                     <div class="form-row">
                         <label>File</label>
-                        <span id="footprint-file" class="dim">—</span>
+                        <button id="footprint-file" class="fp-file-btn" title="No file selected" disabled>—</button>
                     </div>
                     <div class="form-row">
                         <label>Start</label>
@@ -199,7 +211,14 @@
                 <section class="panel-section" id="machine-ctrl-section">
                     <h3 class="section-title">Machine Controls</h3>
 
-                    <button id="btn-tool-change" class="btn-secondary full-width">Tool Change</button>
+                    <div class="clamp-btn-row">
+                        <button id="btn-home" class="btn-secondary" disabled>⌂ Home</button>
+                        <button id="btn-tool-change" class="btn-secondary" disabled>Tool Change</button>
+                    </div>
+                    <div class="clamp-btn-row">
+                        <button id="btn-left-clamp" class="btn-secondary" disabled>Left Clamp</button>
+                        <button id="btn-right-clamp" class="btn-secondary" disabled>Right Clamp</button>
+                    </div>
 
                     <!-- Feed rate override -->
                     <div class="override-row override-slider-row">
@@ -220,8 +239,8 @@
                     <!-- Spindle override -->
                     <div class="override-row override-slider-row">
                         <span class="override-label">RPM</span>
-                        <input type="range" id="sro-slider" class="ovr-slider" min="10" max="200" step="1" value="100">
-                        <span class="override-val" id="sro-val">100%</span>
+                        <input type="range" id="sro-slider" class="ovr-slider" min="1000" max="8000" step="100" value="8000">
+                        <span class="override-val" id="sro-val">8000</span>
                         <button class="btn-ovr-reset" id="btn-sro-reset" title="Reset to 100%">↺</button>
                     </div>
 

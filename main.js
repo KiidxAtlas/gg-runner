@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -46,6 +46,8 @@ const memory = new Memory();
 const interpreter = new Interpreter(memory);
 const serial = new SerialManager();
 const workflow = new WorkflowEngine(libPath, memory, interpreter, serial);
+if (loadedSettings.devMode) workflow.setDevMode(true);
+if (loadedSettings.sanityChecksDisabled) workflow.setSanityChecksDisabled(true);
 
 function summarizeFirmware(info, error) {
     const detected = !!(info?.detected || (info?.rawLines && info.rawLines.length) || (info?.versionText && info.versionText !== 'Unknown'));
@@ -98,6 +100,7 @@ app.whenReady().then(() => {
     // ── Forward workflow events to renderer ──
     workflow.on('state', (s) => mainWindow?.webContents.send('workflow:state', s));
     workflow.on('step', (s) => mainWindow?.webContents.send('workflow:step', s));
+    workflow.on('gcode:file', (f) => mainWindow?.webContents.send('gcode:file', f));
     workflow.on('instruction', (s) => mainWindow?.webContents.send('workflow:instruction', s));
     workflow.on('gcode:line', (l) => mainWindow?.webContents.send('gcode:line', l));
     workflow.on('gcode:done', (r) => {
@@ -144,6 +147,11 @@ ipcMain.handle('serial:send', async (_, line) => {
     catch (e) { return { error: e.message }; }
 });
 
+ipcMain.handle('workflow:openFile', (_, fullPath) => {
+    shell.openPath(fullPath);
+    return { ok: true };
+});
+
 ipcMain.handle('serial:realtime', (_, code) => {
     serial.sendRaw(code);  // code is a number (byte) or single-char string
     return { ok: true };
@@ -176,9 +184,27 @@ ipcMain.handle('workflow:position', () => {
     return { ok: true };
 });
 
+ipcMain.handle('workflow:home', () => {
+    if (!workflow._beginRun()) return { error: 'A workflow is already running.' };
+    workflow.runHome().catch(console.error);
+    return { ok: true };
+});
+
 ipcMain.handle('workflow:toolChange', () => {
     if (!workflow._beginRun()) return { error: 'A workflow is already running.' };
     workflow.runToolChange().catch(console.error);
+    return { ok: true };
+});
+
+ipcMain.handle('workflow:leftClamp', () => {
+    if (!workflow._beginRun()) return { error: 'A workflow is already running.' };
+    workflow.runLeftClamp().catch(console.error);
+    return { ok: true };
+});
+
+ipcMain.handle('workflow:rightClamp', () => {
+    if (!workflow._beginRun()) return { error: 'A workflow is already running.' };
+    workflow.runRightClamp().catch(console.error);
     return { ok: true };
 });
 
@@ -228,6 +254,13 @@ ipcMain.handle('workflow:abort', () => {
 
 ipcMain.handle('workflow:setDevMode', (_, val) => {
     workflow.setDevMode(val);
+    saveSettings({ devMode: !!val });
+    return { ok: true };
+});
+
+ipcMain.handle('workflow:setSanityChecksDisabled', (_, val) => {
+    workflow.setSanityChecksDisabled(val);
+    saveSettings({ sanityChecksDisabled: !!val });
     return { ok: true };
 });
 

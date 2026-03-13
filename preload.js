@@ -10,6 +10,7 @@ const ALLOWED_CHANNELS = [
     'machine:disconnect',
     'gcode:line',
     'gcode:done',
+    'gcode:file',
     'workflow:state',
     'workflow:step',
     'workflow:instruction',
@@ -35,7 +36,10 @@ contextBridge.exposeInMainWorld('gg', {
 
     // ── Setup phase ───────────────────────────────────────────────────────
     position: () => ipcRenderer.invoke('workflow:position'),
+    home: () => ipcRenderer.invoke('workflow:home'),
     toolChange: () => ipcRenderer.invoke('workflow:toolChange'),
+    leftClamp: () => ipcRenderer.invoke('workflow:leftClamp'),
+    rightClamp: () => ipcRenderer.invoke('workflow:rightClamp'),
     probe: () => ipcRenderer.invoke('workflow:probe'),
     configure: () => ipcRenderer.invoke('workflow:configure'),
 
@@ -50,9 +54,13 @@ contextBridge.exposeInMainWorld('gg', {
     resume: () => ipcRenderer.invoke('workflow:resume'),
     abort: () => ipcRenderer.invoke('workflow:abort'),
     setDevMode: (val) => ipcRenderer.invoke('workflow:setDevMode', val),
+    setSanityChecksDisabled: (val) => ipcRenderer.invoke('workflow:setSanityChecksDisabled', val),
 
     // ── Debug ─────────────────────────────────────────────────────────────
     dumpMemory: () => ipcRenderer.invoke('memory:dump'),
+
+    // ── File utilities ────────────────────────────────────────────────────
+    openFile: (fullPath) => ipcRenderer.invoke('workflow:openFile', fullPath),
 
     // ── Library path ─────────────────────────────────────────────────────
     getLibPath: () => ipcRenderer.invoke('lib:getPath'),

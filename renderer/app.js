@@ -20,8 +20,9 @@ function appendLog(el, text, cls = '') {
 let connected = false;
 let currentLibPath = '';
 let workflowState = { phase: 'idle', slideKey: null, running: false };
-let currentFeedOverride = 100;
-let currentSpindleOverride = 100;
+let currentFeedOverride = 100;   // 10–200 %
+let currentSpindleOverride = 100; // 10–200 % (internal GRBL value)
+const SPINDLE_MAX_RPM = 8000;    // GG3 hardware max spindle speed
 let footprintOpts = [];   // [{ key, label, positions }]
 let depthOpts = [];   // [{ key, label? }]
 let currentView = 'idle';
@@ -44,7 +45,6 @@ const FOOTPRINT_FILE_FALLBACKS = {
 };
 
 const FOOTPRINT_FILE_1911_FALLBACKS = {
-    MOS: 'Code/Footprint_Milling/1911_mos_platform_5-32.gcode',
 };
 
 // GRBL real-time override byte codes
@@ -103,6 +103,9 @@ const btnRunFp = $('btn-run-fp');
 const holeSelect = $('hole-select');
 const btnRunHoles = $('btn-run-holes');
 const btnToolChange = $('btn-tool-change');
+const btnHome = $('btn-home');
+const btnLeftClamp = $('btn-left-clamp');
+const btnRightClamp = $('btn-right-clamp');
 const outputLog = $('output-log');
 const manualIn = $('manual-in');
 const btnSendManual = $('btn-send-manual');
@@ -119,12 +122,14 @@ const btnFeedHold = $('btn-feed-hold');
 const btnCycleStart = $('btn-cycle-start');
 const btnSoftReset = $('btn-soft-reset');
 const chkDevMode = $('chk-dev-mode');
+const chkSanityDisable = $('chk-sanity-disable');
 const libPathDisplay = $('lib-path-display');
 const btnBrowseLib = $('btn-browse-lib');
 const runResultRow = $('run-result-row');
 const runResultIcon = $('run-result-icon');
 const runResultText = $('run-result-text');
 const btnNewRun = $('btn-new-run');
+const runFileBtn = $('run-file-btn');
 
 // ── View switching ─────────────────────────────────────────────────────────
 
@@ -252,8 +257,18 @@ function resolveFootprintFile(fp) {
 function updateFootprintFileDisplay() {
     const fp = footprintOpts.find(f => f.key === fpSelect.value);
     const file = resolveFootprintFile(fp);
-    footprintFile.textContent = file || '—';
-    footprintFile.title = file || 'No footprint file selected';
+    if (file && currentLibPath) {
+        const name = file.split('/').pop();
+        footprintFile.textContent = name;
+        footprintFile.title = `${file}  —  click to open`;
+        footprintFile.dataset.path = currentLibPath + '/' + file;
+        footprintFile.disabled = false;
+    } else {
+        footprintFile.textContent = '—';
+        footprintFile.title = 'No footprint file selected';
+        delete footprintFile.dataset.path;
+        footprintFile.disabled = true;
+    }
 }
 
 function getResumeLine() {
@@ -288,6 +303,9 @@ function updateButtonStates() {
     btnConfigure.disabled = !canConfigure;
     btnAbort.classList.toggle('hidden', !running);
     btnToolChange.disabled = !canManualMachineMove;
+    btnHome.disabled = !canManualMachineMove;
+    btnLeftClamp.disabled = !canManualMachineMove;
+    btnRightClamp.disabled = !canManualMachineMove;
 
     // Right cut panel
     const locked = !canCut;
@@ -393,6 +411,8 @@ function startRun(label) {
     runStepCount.textContent = '';
     runResultRow.classList.add('hidden');
     btnNewRun.classList.add('hidden');
+    runFileBtn.textContent = '—';
+    delete runFileBtn.dataset.path;
     appendLog(gcodeLog, '▶ ' + label, 'dim');
 }
 
@@ -492,6 +512,25 @@ function bindUI() {
         window.gg.toolChange();
     });
 
+    btnHome.addEventListener('click', () => {
+        startRun('Homing machine…');
+        window.gg.home();
+    });
+
+    btnLeftClamp.addEventListener('click', () => {
+        startRun('Moving to left clamp position…');
+        window.gg.leftClamp();
+    });
+
+    btnRightClamp.addEventListener('click', () => {
+        startRun('Moving to right clamp position…');
+        window.gg.rightClamp();
+    });
+
+    footprintFile.addEventListener('click', () => {
+        if (footprintFile.dataset.path) window.gg.openFile(footprintFile.dataset.path);
+    });
+
     btnContinue.addEventListener('click', () => {
         showView('running');
         window.gg.continueStep();
@@ -508,6 +547,10 @@ function bindUI() {
 
     btnNewRun.addEventListener('click', resetRun);
 
+    runFileBtn.addEventListener('click', () => {
+        if (runFileBtn.dataset.path) window.gg.openFile(runFileBtn.dataset.path);
+    });
+
     memWrap.addEventListener('toggle', refreshMem);
 
     bindOverrides();
@@ -521,17 +564,29 @@ function sendManual() {
     manualIn.value = '';
 }
 
-function _setSliderPct(slider, value) {
-    const pct = ((value - 10) / (200 - 10)) * 100;
+function _setSliderPct(slider, value, min, max) {
+    const pct = ((value - min) / (max - min)) * 100;
     slider.style.setProperty('--pct', pct.toFixed(1));
 }
 
-function _sendIncrements(current, target, plus10, minus10, plus1, minus1) {
-    let v = current;
+// Send RESET then ramp from 100 to target — used on final commit (mouseup/change).
+function _sendIncrements(reset, target, plus10, minus10, plus1, minus1) {
+    window.gg.sendRealtime(reset); // reset to 100%
+    let v = 100;
     while (v < target - 9) { window.gg.sendRealtime(plus10); v += 10; }
     while (v > target + 9) { window.gg.sendRealtime(minus10); v -= 10; }
     while (v < target) { window.gg.sendRealtime(plus1); v += 1; }
     while (v > target) { window.gg.sendRealtime(minus1); v -= 1; }
+}
+
+// Send only the delta between current and next during drag — faster response.
+function _sendDelta(from, to, plus10, minus10, plus1, minus1) {
+    let v = from;
+    while (v < to - 9) { window.gg.sendRealtime(plus10); v += 10; }
+    while (v > to + 9) { window.gg.sendRealtime(minus10); v -= 10; }
+    while (v < to) { window.gg.sendRealtime(plus1); v += 1; }
+    while (v > to) { window.gg.sendRealtime(minus1); v -= 1; }
+    return v;
 }
 
 function bindOverrides() {
@@ -546,12 +601,17 @@ function bindOverrides() {
 
     // Feed slider
     froSlider.addEventListener('input', () => {
-        froVal.textContent = froSlider.value + '%';
-        _setSliderPct(froSlider, parseInt(froSlider.value));
+        const target = parseInt(froSlider.value);
+        froVal.textContent = target + '%';
+        _setSliderPct(froSlider, target, 10, 200);
+        // Send delta bytes immediately while dragging so the machine responds in real-time
+        currentFeedOverride = _sendDelta(currentFeedOverride, target,
+            RT.FEED_PLUS10, RT.FEED_MINUS10, RT.FEED_PLUS1, RT.FEED_MINUS1);
     });
     froSlider.addEventListener('change', () => {
+        // On release: hard reset + ramp to guarantee sync with GRBL's actual state
         const target = parseInt(froSlider.value);
-        _sendIncrements(currentFeedOverride, target,
+        _sendIncrements(RT.FEED_RESET, target,
             RT.FEED_PLUS10, RT.FEED_MINUS10, RT.FEED_PLUS1, RT.FEED_MINUS1);
         currentFeedOverride = target;
     });
@@ -560,26 +620,33 @@ function bindOverrides() {
         currentFeedOverride = 100;
         froVal.textContent = '100%';
         froSlider.value = 100;
-        _setSliderPct(froSlider, 100);
+        _setSliderPct(froSlider, 100, 10, 200);
     });
 
-    // RPM slider
+    // RPM slider — value is actual RPM (1000–8000), converted to % override
+    // relative to the gcode's programmed S value before sending to GRBL.
     sroSlider.addEventListener('input', () => {
-        sroVal.textContent = sroSlider.value + '%';
-        _setSliderPct(sroSlider, parseInt(sroSlider.value));
+        const rpm = parseInt(sroSlider.value);
+        sroVal.textContent = rpm;
+        _setSliderPct(sroSlider, rpm, 1000, 8000);
+        const targetPct = Math.round(Math.max(10, Math.min(200, (rpm / SPINDLE_MAX_RPM) * 100)));
+        currentSpindleOverride = _sendDelta(currentSpindleOverride, targetPct,
+            RT.SPINDLE_PLUS10, RT.SPINDLE_MINUS10, RT.SPINDLE_PLUS1, RT.SPINDLE_MINUS1);
     });
     sroSlider.addEventListener('change', () => {
-        const target = parseInt(sroSlider.value);
-        _sendIncrements(currentSpindleOverride, target,
+        // Do NOT send SPINDLE_RESET here — on a VFD spindle it cuts power momentarily
+        // and stops the tool. Just send the remaining delta to reach the target.
+        const rpm = parseInt(sroSlider.value);
+        const targetPct = Math.round(Math.max(10, Math.min(200, (rpm / SPINDLE_MAX_RPM) * 100)));
+        currentSpindleOverride = _sendDelta(currentSpindleOverride, targetPct,
             RT.SPINDLE_PLUS10, RT.SPINDLE_MINUS10, RT.SPINDLE_PLUS1, RT.SPINDLE_MINUS1);
-        currentSpindleOverride = target;
     });
     $('btn-sro-reset').addEventListener('click', () => {
         window.gg.sendRealtime(RT.SPINDLE_RESET);
         currentSpindleOverride = 100;
-        sroVal.textContent = '100%';
-        sroSlider.value = 100;
-        _setSliderPct(sroSlider, 100);
+        sroVal.textContent = SPINDLE_MAX_RPM;
+        sroSlider.value = SPINDLE_MAX_RPM;
+        _setSliderPct(sroSlider, SPINDLE_MAX_RPM, 1000, 8000);
     });
 
     btnFeedHold.addEventListener('click', () => window.gg.hold());
@@ -587,6 +654,10 @@ function bindOverrides() {
     btnSoftReset.addEventListener('click', () => window.gg.abort());
     chkDevMode.addEventListener('change', () => {
         window.gg.setDevMode(chkDevMode.checked);
+    });
+
+    chkSanityDisable.addEventListener('change', () => {
+        window.gg.setSanityChecksDisabled(chkSanityDisable.checked);
     });
     btnBrowseLib.addEventListener('click', async () => {
         const result = await window.gg.browseLibPath();
@@ -615,14 +686,16 @@ function bindEvents() {
             currentFeedOverride = s.overrides.feed;
             currentSpindleOverride = s.overrides.spindle;
             froVal.textContent = s.overrides.feed + '%';
-            sroVal.textContent = s.overrides.spindle + '%';
+            // Convert GRBL spindle % back to RPM for display
+            const spindleRpm = Math.round((s.overrides.spindle / 100) * SPINDLE_MAX_RPM);
+            sroVal.textContent = spindleRpm;
             if (!froSlider.matches(':active')) {
                 froSlider.value = s.overrides.feed;
-                _setSliderPct(froSlider, s.overrides.feed);
+                _setSliderPct(froSlider, s.overrides.feed, 10, 200);
             }
             if (!sroSlider.matches(':active')) {
-                sroSlider.value = s.overrides.spindle;
-                _setSliderPct(sroSlider, s.overrides.spindle);
+                sroSlider.value = spindleRpm;
+                _setSliderPct(sroSlider, spindleRpm, 1000, 8000);
             }
         }
     });
@@ -636,6 +709,13 @@ function bindEvents() {
     window.gg.on('machine:alarm', (a) => {
         appendLog(outputLog, 'ALARM: ' + a, 'err');
         appendLog(gcodeLog, 'ALARM: ' + a, 'err');
+    });
+
+    window.gg.on('gcode:file', ({ relPath, fullPath }) => {
+        const name = relPath.split('/').pop();
+        runFileBtn.textContent = name;
+        runFileBtn.dataset.path = fullPath;
+        runFileBtn.title = `${relPath}  —  click to open`;
     });
 
     window.gg.on('gcode:line', (l) => {
@@ -675,6 +755,7 @@ function bindEvents() {
         updateFootprintFileDisplay();
         updateButtonStates();
         if (chkDevMode) chkDevMode.checked = !!state.devMode;
+        if (chkSanityDisable) chkSanityDisable.checked = !!state.sanityChecksDisabled;
         btnFeedHold.classList.toggle('btn-rt-held', !!state.held);
         btnCycleStart.classList.toggle('btn-rt-active', !!state.held);
         // Restore the radio selection if slide changed
@@ -698,11 +779,11 @@ function bindEvents() {
         currentFeedOverride = 100;
         currentSpindleOverride = 100;
         froVal.textContent = '100%';
-        sroVal.textContent = '100%';
+        sroVal.textContent = SPINDLE_MAX_RPM;
         froSlider.value = 100;
-        sroSlider.value = 100;
-        _setSliderPct(froSlider, 100);
-        _setSliderPct(sroSlider, 100);
+        sroSlider.value = SPINDLE_MAX_RPM;
+        _setSliderPct(froSlider, 100, 10, 200);
+        _setSliderPct(sroSlider, SPINDLE_MAX_RPM, 1000, 8000);
         appendLog(outputLog, '⚠ Machine disconnected', 'err');
     });
 
