@@ -171,6 +171,15 @@
                             <option value="">—</option>
                         </select>
                     </div>
+                    <div class="form-row">
+                        <label>File</label>
+                        <span id="footprint-file" class="dim">—</span>
+                    </div>
+                    <div class="form-row">
+                        <label>Start</label>
+                        <input id="resume-line" type="number" min="1" step="1" placeholder="1" />
+                    </div>
+                    <div id="resume-hint" class="dim">Optional. Uses the line number from the milling file only; config and depth still run first.</div>
                     <button id="btn-run-fp" class="btn-accent full-width" disabled>Mill Footprint</button>
                 </section>
 

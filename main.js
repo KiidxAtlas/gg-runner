@@ -194,9 +194,9 @@ ipcMain.handle('workflow:configure', () => {
     return { ok: true };
 });
 
-ipcMain.handle('workflow:runFootprint', (_, { fp, position, depth }) => {
+ipcMain.handle('workflow:runFootprint', (_, { fp, position, depth, startLine, slideKey }) => {
     if (!workflow._beginRun()) return { error: 'A workflow is already running.' };
-    workflow.runFootprint(fp, position, depth).catch(console.error);
+    workflow.runFootprint(fp, position, depth, startLine, slideKey).catch(console.error);
     return { ok: true };
 });
 

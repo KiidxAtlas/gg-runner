@@ -228,6 +228,7 @@ class WorkflowEngine extends EventEmitter {
     getFootprintOptions(slideKey) {
         const slide = SLIDE_TYPES[slideKey];
         if (!slide) return [];
+        const is1911 = !!slide.is1911;
         return slide.footprints.map(k => {
             const fp = FOOTPRINTS[k];
             const rearOnly = slide.rearOnly.includes(k);
@@ -235,6 +236,7 @@ class WorkflowEngine extends EventEmitter {
                 key: k,
                 label: fp.label,
                 positions: rearOnly ? ['Rear'] : ['Rear', 'Standard'],
+                millFile: (is1911 && fp.mill1911) ? fp.mill1911 : fp.mill,
             };
         });
     }
@@ -365,7 +367,12 @@ class WorkflowEngine extends EventEmitter {
 
     // ── Cut operations ───────────────────────────────────────────────────────
 
-    async runFootprint(fpKey, position, depthKey) {
+    async runFootprint(fpKey, position, depthKey, startLine = 1, selectedSlideKey = null) {
+        if (selectedSlideKey && SLIDE_TYPES[selectedSlideKey] && selectedSlideKey !== this.slideKey) {
+            this.slideKey = selectedSlideKey;
+            this._emitState();
+        }
+
         const slide = this._requireSlide();
         const fp = FOOTPRINTS[fpKey];
         if (!slide || !fp) return;
@@ -377,6 +384,12 @@ class WorkflowEngine extends EventEmitter {
         const ready = await this._preflightCheck();
         if (!ready) return;
 
+        const resumeLine = Number.parseInt(startLine, 10);
+        if (!Number.isInteger(resumeLine) || resumeLine < 1) {
+            this.emit('gcode:done', { error: 'Start line must be a whole number greater than or equal to 1.' });
+            return;
+        }
+
         const is1911 = !!SLIDE_TYPES[this.slideKey].is1911;
         const cfgFile = (is1911 && fp.configs1911) ? fp.configs1911[position] : fp.configs[position];
         const millFile = (is1911 && fp.mill1911) ? fp.mill1911 : fp.mill;
@@ -385,6 +398,11 @@ class WorkflowEngine extends EventEmitter {
             this.emit('gcode:done', { error: 'Invalid footprint/depth combination' });
             return;
         }
+
+        this.emit('gcode:line', `Selected slide: ${slide.label}`);
+        this.emit('gcode:line', `Config file: ${cfgFile}`);
+        this.emit('gcode:line', `Depth file: ${depthObj.file}`);
+        this.emit('gcode:line', `Mill file: ${millFile}`);
 
         const files = [
             { file: cfgFile, text: `Configuring ${fp.label} – ${position}…` },
@@ -395,13 +413,21 @@ class WorkflowEngine extends EventEmitter {
         if (is1911 && fp.mill1911) {
             files.push({ file: 'Code/home.gcode', text: 'Homing before milling…' });
         }
-        files.push({ file: millFile, text: `Milling ${fp.label}…` });
+        files.push({
+            file: millFile,
+            text: resumeLine > 1
+                ? `Milling ${fp.label} from line ${resumeLine}…`
+                : `Milling ${fp.label}…`,
+            startLine: resumeLine,
+        });
 
         for (let i = 0; i < files.length; i++) {
             if (this._aborted) break;
-            const { file, text } = files[i];
+            const { file, text, startLine: fileStartLine } = files[i];
             this.emit('step', { index: i + 1, total: files.length, text });
-            const result = await this._runFile(file, text);
+            const result = fileStartLine > 1
+                ? await this._runFileFromLine(file, text, fileStartLine)
+                : await this._runFile(file, text);
             if (result?.error) return;
         }
         if (!this._aborted) {
@@ -638,8 +664,65 @@ class WorkflowEngine extends EventEmitter {
         }
 
         const lines = fs.readFileSync(full, 'utf8').replace(/\r\n/g, '\n').split('\n');
+        this.emit('gcode:line', `File: ${relPath}`);
 
         return this._runLines(lines.map(sourceLine => normalizeLibraryGcodeLine(relPath, sourceLine)), _label);
+    }
+
+    async _runFileFromLine(relPath, _label, startLine) {
+        if (startLine <= 1) return this._runFile(relPath, _label);
+        if (this._aborted) return { error: 'Aborted' };
+
+        const full = path.join(this.libPath, relPath);
+        if (!fs.existsSync(full)) {
+            const err = `File not found: ${relPath}`;
+            this.emit('gcode:done', { error: err });
+            return { error: err };
+        }
+
+        const lines = fs.readFileSync(full, 'utf8').replace(/\r\n/g, '\n').split('\n');
+        if (startLine > lines.length) {
+            const err = `Start line ${startLine} is past the end of ${path.basename(relPath)} (${lines.length} lines).`;
+            this.emit('gcode:done', { error: err });
+            return { error: err };
+        }
+
+        const preambleEndLine = this._findResumePreambleEndLine(relPath, lines);
+        const usePreamble = preambleEndLine > 0 && startLine > preambleEndLine;
+        const preamble = usePreamble ? lines.slice(0, preambleEndLine) : [];
+        const sliced = lines
+            .slice(startLine - 1)
+            .map(sourceLine => normalizeLibraryGcodeLine(relPath, sourceLine));
+
+        this.emit('gcode:line', `File: ${relPath}`);
+        if (usePreamble) {
+            this.emit('gcode:line', `↷ Preserving setup lines 1-${preambleEndLine}, then resuming at line ${startLine}`);
+        } else {
+            this.emit('gcode:line', `↷ Resuming ${path.basename(relPath)} from line ${startLine}`);
+        }
+
+        const resumeLines = usePreamble
+            ? preamble.map(sourceLine => normalizeLibraryGcodeLine(relPath, sourceLine)).concat(sliced)
+            : sliced;
+
+        return this._runLines(resumeLines, _label);
+    }
+
+    _findResumePreambleEndLine(relPath, lines) {
+        for (let i = 0; i < lines.length; i++) {
+            const rawLine = normalizeLibraryGcodeLine(relPath, lines[i]);
+            const rawTrimmed = rawLine.trim();
+            const stripped = DDCUT_MCODE.test(rawTrimmed)
+                ? rawTrimmed
+                : rawLine.replace(/\([^)]*\)/g, '').trim();
+
+            if (!stripped) continue;
+            if (DDCUT_MCODE.test(stripped)) continue;
+
+            // Stop once the file starts commanding motion with coordinates.
+            if (/[XYZIJK]/i.test(stripped)) return i;
+        }
+        return 0;
     }
 
     async _runLines(lines, _label) {

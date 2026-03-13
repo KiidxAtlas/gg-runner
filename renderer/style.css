@@ -584,7 +584,8 @@ body {
     width: 56px;
 }
 
-.form-row select {
+.form-row select,
+.form-row input {
     flex: 1;
     background: var(--panel2);
     border: 1px solid var(--border2);
@@ -593,6 +594,29 @@ body {
     border-radius: 4px;
     font-size: 12px;
     min-width: 0;
+}
+
+.form-row input::placeholder {
+    color: var(--muted);
+}
+
+.input-invalid {
+    border-color: var(--err) !important;
+    color: var(--err) !important;
+}
+
+#resume-hint {
+    font-size: 11px;
+    line-height: 1.4;
+    margin-top: -2px;
+}
+
+#footprint-file {
+    font-size: 11px;
+    line-height: 1.4;
+    word-break: break-word;
+    text-align: right;
+    flex: 1;
 }
 
 .full-width {

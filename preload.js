@@ -40,8 +40,8 @@ contextBridge.exposeInMainWorld('gg', {
     configure: () => ipcRenderer.invoke('workflow:configure'),
 
     // ── Cut operations ────────────────────────────────────────────────────
-    runFootprint: (fp, position, depth) =>
-        ipcRenderer.invoke('workflow:runFootprint', { fp, position, depth }),
+    runFootprint: (fp, position, depth, startLine = 1, slideKey = null) =>
+        ipcRenderer.invoke('workflow:runFootprint', { fp, position, depth, startLine, slideKey }),
     runHoles: (holeType) => ipcRenderer.invoke('workflow:runHoles', holeType),
 
     // ── Mid-operation control ─────────────────────────────────────────────

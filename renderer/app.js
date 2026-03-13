@@ -26,6 +26,27 @@ let footprintOpts = [];   // [{ key, label, positions }]
 let depthOpts = [];   // [{ key, label? }]
 let currentView = 'idle';
 
+const runtimeState = window.__ggRunnerRuntime || (window.__ggRunnerRuntime = {
+    uiBound: false,
+    eventsBound: false,
+    initialized: false,
+});
+
+const FOOTPRINT_FILE_FALLBACKS = {
+    RMR: 'Code/Footprint_Milling/rmr_5-32.gcode',
+    Docter: 'Code/Footprint_Milling/docter_5-32.gcode',
+    MOS: 'Code/Footprint_Milling/mos_5-32.gcode',
+    RMS: 'Code/Footprint_Milling/rms_5-32.gcode',
+    RMRcc: 'Code/Footprint_Milling/RMRcc Rough and finish.gcode',
+    Viper: 'Code/Footprint_Milling/Viper Rough and finish.gcode',
+    Razor: 'Code/Footprint_Milling/Razor Rough and finish.gcode',
+    DPP: 'Code/Footprint_Milling/DPP Rough and Finish.gcode',
+};
+
+const FOOTPRINT_FILE_1911_FALLBACKS = {
+    MOS: 'Code/Footprint_Milling/1911_mos_platform_5-32.gcode',
+};
+
 // GRBL real-time override byte codes
 const RT = {
     FEED_RESET: 0x90,
@@ -76,6 +97,8 @@ const doneBody = $('done-body');
 const fpSelect = $('fp-select');
 const posSelect = $('pos-select');
 const depthSelect = $('depth-select');
+const footprintFile = $('footprint-file');
+const resumeLineInput = $('resume-line');
 const btnRunFp = $('btn-run-fp');
 const holeSelect = $('hole-select');
 const btnRunHoles = $('btn-run-holes');
@@ -211,7 +234,39 @@ function onFpChange() {
             posSelect.appendChild(o);
         }
     }
+    updateFootprintFileDisplay();
     updateButtonStates();
+}
+
+function resolveFootprintFile(fp) {
+    if (!fp) return '';
+
+    const slideKey = workflowState.slideKey;
+    if (slideKey === '1911' && FOOTPRINT_FILE_1911_FALLBACKS[fp.key]) {
+        return FOOTPRINT_FILE_1911_FALLBACKS[fp.key];
+    }
+
+    return fp.millFile || FOOTPRINT_FILE_FALLBACKS[fp.key] || '';
+}
+
+function updateFootprintFileDisplay() {
+    const fp = footprintOpts.find(f => f.key === fpSelect.value);
+    const file = resolveFootprintFile(fp);
+    footprintFile.textContent = file || '—';
+    footprintFile.title = file || 'No footprint file selected';
+}
+
+function getResumeLine() {
+    const raw = resumeLineInput.value.trim();
+    if (!raw) return 1;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+}
+
+function updateResumeLineState() {
+    const line = getResumeLine();
+    resumeLineInput.classList.toggle('input-invalid', line === null);
+    btnRunFp.textContent = line && line > 1 ? 'Mill Footprint From Line' : 'Mill Footprint';
 }
 
 // ── Button state management ────────────────────────────────────────────────
@@ -224,6 +279,7 @@ function updateButtonStates() {
     const isReady = phase === 'ready';
     const canCut = active && isReady && !running;
     const canManualMachineMove = active && !running && !!currentLibPath;
+    const resumeLine = getResumeLine();
     // Configure requires probe to have been run at least once
     const canConfigure = canSetup && (phase === 'probed' || phase === 'ready');
 
@@ -237,8 +293,9 @@ function updateButtonStates() {
     const locked = !canCut;
     fpSection.classList.toggle('locked', locked);
     holeSection.classList.toggle('locked', locked);
-    btnRunFp.disabled = locked || !fpSelect.value || !depthSelect.value;
+    btnRunFp.disabled = locked || !fpSelect.value || !depthSelect.value || resumeLine === null;
     btnRunHoles.disabled = locked;
+    updateResumeLineState();
 }
 
 function updateSlideStateSummary() {
@@ -362,6 +419,9 @@ function resetRun() {
 // ── Event bindings ─────────────────────────────────────────────────────────
 
 function bindUI() {
+    if (runtimeState.uiBound) return;
+    runtimeState.uiBound = true;
+
     btnRefresh.addEventListener('click', refreshPorts);
 
     btnConnect.addEventListener('click', async () => {
@@ -407,15 +467,18 @@ function bindUI() {
 
     fpSelect.addEventListener('change', onFpChange);
     depthSelect.addEventListener('change', updateButtonStates);
+    resumeLineInput.addEventListener('input', updateButtonStates);
 
     btnRunFp.addEventListener('click', () => {
         const fp = fpSelect.value;
         const pos = posSelect.value;
         const depth = depthSelect.value;
-        if (!fp || !depth) return;
+        const startLine = getResumeLine();
+        if (!fp || !depth || startLine === null) return;
         const fpLabel = footprintOpts.find(f => f.key === fp)?.label || fp;
-        startRun(`Milling ${fpLabel} – ${pos} at ${depth}…`);
-        window.gg.runFootprint(fp, pos, depth);
+        const lineSuffix = startLine > 1 ? ` from line ${startLine}` : '';
+        startRun(`Milling ${fpLabel} – ${pos} at ${depth}${lineSuffix}…`);
+        window.gg.runFootprint(fp, pos, depth, startLine, workflowState.slideKey);
     });
 
     btnRunHoles.addEventListener('click', () => {
@@ -540,6 +603,9 @@ function bindOverrides() {
 // ── Machine / workflow events ──────────────────────────────────────────────
 
 function bindEvents() {
+    if (runtimeState.eventsBound) return;
+    runtimeState.eventsBound = true;
+
     window.gg.on('machine:status', (s) => {
         const pos = s.pos
             ? `  X:${s.pos.x.toFixed(3)} Y:${s.pos.y.toFixed(3)} Z:${s.pos.z.toFixed(3)}`
@@ -606,6 +672,7 @@ function bindEvents() {
         workflowState = state;
         updatePhaseDots(state.phase);
         updateSlideStateSummary();
+        updateFootprintFileDisplay();
         updateButtonStates();
         if (chkDevMode) chkDevMode.checked = !!state.devMode;
         btnFeedHold.classList.toggle('btn-rt-held', !!state.held);
@@ -662,6 +729,9 @@ async function refreshMem() {
 // ── Init ───────────────────────────────────────────────────────────────────
 
 async function init() {
+    if (runtimeState.initialized) return;
+    runtimeState.initialized = true;
+
     await refreshPorts();
     const libStatus = await window.gg.getLibStatus();
     applyLibStatus(libStatus, !!libStatus?.path && !libStatus?.ok);
@@ -684,6 +754,7 @@ async function init() {
     }
 
     updateButtonStates();
+    updateResumeLineState();
     bindUI();
     bindEvents();
 }
